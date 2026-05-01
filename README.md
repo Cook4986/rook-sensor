@@ -2,7 +2,6 @@
   <img src="assets/rook_logo.png" alt="Rook" width="200">
 </p>
 
-<h1 align="center">Rook</h1>
 <p align="center"><strong>Privacy-First, Visual-to-Emoji Ambient Monitor</strong></p>
 <p align="center">
   Edge AI on a Raspberry Pi 5 — translates street activity into emoji SMS dashboards.<br>
