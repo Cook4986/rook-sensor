@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+rook-env/
+venv/
+.venv/
+
+# Environment / secrets
+.env
+*.env
+
+# YOLO model weights (downloaded at runtime)
+*.pt
+*.onnx
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Temporary
+/tmp/
+*.jpg
+*.jpeg
+*.png
+!assets/*.png
