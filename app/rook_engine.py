@@ -42,34 +42,41 @@ logging.basicConfig(
 # ── COCO Class → Emoji ────────────────────────────────────────────────────────
 EMOJI_MAP = {
     "person": "🚶", "backpack": "🎒", "umbrella": "☂️", "suitcase": "🧳", "cell phone": "📱",
-  # ── Rarity Scores — urban yard context ──────────────────────────────────
-# Philosophy: score = urban unusualness. Crowd/emergency/anomaly → high. Routine → low.
-# Barnyard classes (sheep/cow/horse) are COCO misclassifications in urban context — silenced.
+    "skateboard": "🛹", "sports ball": "⚽", "frisbee": "🥏", "kite": "🪁",
+    "bicycle": "🚲", "car": "🚗", "motorcycle": "🏍️",
+    "bus": "🚌", "truck": "🚚",
+    "dog": "🐕", "cat": "🐈", "bird": "🦅",
+    "bear": "🐻", "horse": "🐎", "sheep": "🐑", "cow": "🐄"
+}
+
+# ── Rarity Scores — urban yard context ───────────────────────────────────────
+# Score = how unusual is this in an urban yard? Routine → low. Anomaly/incident → high.
+# Barnyard classes are COCO misclassifications in urban context — silenced.
 SCORE_MAP = {
-    # ─ Routine (Slack-only) ──────────────────────────────────────────────
-    "person":      2,   # Pedestrian — routine
+    # ─ Routine (Slack-only) ───────────────────────────────────────────────────
+    "person":      2,   # Pedestrian — common
     "dog":         4,   # Dog walker
-    "bird":        3,   # Common yard bird (silent solo)
+    "bird":        3,   # Common yard bird (robin, crow) — silent solo
     "backpack":    3,
     "umbrella":    3,
     "cell phone":  2,
     "motorcycle":  5,   # Road traffic; could be police motorcycle
-    # ─ Notable urban events (Slack + potential Email) ─────────────────────
-    "bus":         8,   # Transit event, large crowd vehicle
-    "truck":      12,   # Delivery, utility — OR fire truck/ambulance (same COCO class)
+    # ─ Notable urban events ───────────────────────────────────────────────────
+    "bus":         8,   # Transit; large crowd vehicle
+    "truck":      12,   # Delivery/utility — OR fire truck/ambulance (same COCO class)
     "suitcase":    8,   # Someone moving
     "kite":        6,
     "frisbee":     5,
     "sports ball": 5,
     "skateboard":  4,
-    "cat":         4,   # Less interesting in urban context
-    # ─ Silenced / barnyard noise (COCO urban misclassifications) ─────────
-    "sheep":       1,   # Urban: COCO misclassification — silenced
+    "cat":         4,
+    # ─ Barnyard / urban COCO noise — silenced ────────────────────────────────
+    "sheep":       1,
     "cow":         1,
     "horse":       1,
-    # ─ Critical ───────────────────────────────────────────────────
+    # ─ Critical ──────────────────────────────────────────────────────────────
     "bear":      100,
-    # ─ Silent solo (suppressed before scoring) ────────────────────────
+    # ─ Silent solo ───────────────────────────────────────────────────────────
     "car":         1,
     "bicycle":     1,
 }
@@ -83,8 +90,7 @@ WILDLIFE_CLASSES    = ANIMAL_CLASSES
 
 # Classes silenced when appearing solo (too routine or urban COCO misclassification)
 SILENT_SOLO_CLASSES = {"car", "bicycle", "bird", "sheep", "cow", "horse"}
-DELIVERY_CLASSES    = {"truck"}
-WILDLIFE_CLASSES    = ANIMAL_CLASSES
+
 
 
 
