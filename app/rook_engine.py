@@ -124,13 +124,22 @@ def get_temp():
         return 0.0
 
 def configure_camera_exposure(cam):
-    """Sets camera EV and limits based on day/night."""
+    """Sets camera EV, limits, and Auto White Balance (AWB) for color accuracy."""
+    base_controls = {
+        "AwbEnable": True,
+        "AwbMode": 0,          # auto
+        "Contrast": 1.1,       # Slight bump for YOLO feature extraction
+        "Saturation": 1.1      # Help color fidelity on the IMX462
+    }
+    
     if is_daytime():
-        cam.set_controls({"ExposureValue": 0.0, "FrameDurationLimits": (33333, 33333)})
-        logging.info("☀️  Camera locked to Daytime Exposure")
+        base_controls.update({"ExposureValue": 0.0, "FrameDurationLimits": (33333, 33333)})
+        cam.set_controls(base_controls)
+        logging.info("☀️  Camera locked to Daytime Exposure + AWB")
     else:
-        cam.set_controls({"ExposureValue": 1.0, "FrameDurationLimits": (33333, 100000)})
-        logging.info("🌙 Camera locked to Nighttime Exposure")
+        base_controls.update({"ExposureValue": 1.0, "FrameDurationLimits": (33333, 100000)})
+        cam.set_controls(base_controls)
+        logging.info("🌙 Camera locked to Nighttime Exposure + AWB")
 
 def send_daily_digest(notify_email, best_image_data):
     """Compiles the daily log file and emails it at 6 PM, including the most interesting photo."""
@@ -300,8 +309,9 @@ def main():
                 if now - last_alert_time > COOLDOWN_SECONDS:
                     logging.info(f"🚨 Motion Detected ({motion_pixels} px)! Running YOLO...")
                     
-                    # Run YOLO on the full-res frame at intermediate resolution (800px)
-                    results = model(frame, imgsz=800, conf=0.45, verbose=False)
+                    # Run YOLO on the exact cached full-res frame that triggered the motion
+                    # Upgraded to 1088px (native 1080p) for maximum visual acuity
+                    results = model(frame, imgsz=1088, conf=0.45, verbose=False)
                     
                     # Extract all classes detected (with duplicates for counting)
                     detected_classes = [results[0].names[int(c)] for c in results[0].boxes.cls]
@@ -356,8 +366,7 @@ def main():
                     # Motion detected, but we are in cooldown. Just update the MOG2 background state.
                     pass
             
-            # Small sleep to prevent 100% CPU pinning on the MOG loop
-            time.sleep(0.1)
+            # No sleep delay. We run the MOG2 loop as fast as the hardware allows to minimize capture latency.
 
     except KeyboardInterrupt:
         logging.info("\n🛑 Shutting down Rook Engine...")
