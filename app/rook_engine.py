@@ -21,9 +21,9 @@ QUIET_HOURS_END = 6             # 6 AM
 
 # Base YOLO COCO to Emoji map
 EMOJI_MAP = {
-    "person": "🚶‍♂️", "backpack": "🎒", "umbrella": "☂️",
-    "bicycle": "🚲💨", "car": "🚗", "motorcycle": "🏍️",
-    "bus": "🚌🛑", "truck": "🚚",
+    "person": "🚶", "backpack": "🎒", "umbrella": "☂️",
+    "bicycle": "🚲", "car": "🚗", "motorcycle": "🏍️",
+    "bus": "🚌", "truck": "🚚",
     "dog": "🐕", "cat": "🐈", "bird": "🦅",
     "bear": "🐻", "horse": "🐎", "sheep": "🐑", "cow": "🐄"
 }
@@ -41,21 +41,21 @@ def translate_to_emoji_summary(detected_classes):
     
     # 1. Neighborhood Patterns
     if counts.get("person", 0) > 3:
-        summary.append("🏟️ (Crowd)")
+        summary.append("🏟️")
     elif counts.get("person", 0) > 1:
-        summary.append("👨‍👩‍👧‍👦 (Group)")
+        summary.append("👥")
         
     if "person" in counts and "dog" in counts:
-        summary.append("🐕🦺 (Dog Walker)")
+        summary.append("🐕🚶")
         counts["person"] = 0 # Consume the person
         counts["dog"] = 0    # Consume the dog
         
     # 2. Routine Logistics
     if "truck" in counts:
-        summary.append("📦🚚 (Delivery/Service Truck)")
+        summary.append("🚚")
         counts["truck"] = 0
     if "bus" in counts:
-        summary.append("🚌🛑 (Bus)")
+        summary.append("🚌")
         counts["bus"] = 0
         
     # 3. Leftovers
