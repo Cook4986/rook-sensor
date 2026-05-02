@@ -181,7 +181,7 @@ def main():
                     results = model(frame, imgsz=640, conf=0.45, verbose=False)
                     
                     # Extract all classes detected (with duplicates for counting)
-                    detected_classes = [r.names[int(c)] for r in results[0].boxes.cls]
+                    detected_classes = [results[0].names[int(c)] for c in results[0].boxes.cls]
                     
                     if not detected_classes:
                         print("   Ghost motion (no objects found). Ignored.")
