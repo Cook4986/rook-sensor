@@ -12,6 +12,7 @@ from picamera2 import Picamera2
 from ultralytics import YOLO
 from suntime import Sun
 import httpx
+from rook_weather import RookEnrichment
 
 # Load Environment Variables
 load_dotenv(os.path.expanduser("~/rook-env/.env"))
@@ -248,6 +249,10 @@ def dispatch_alerts_async(img_score, emojis, out_path):
     if not dispatched:
         logging.info(f"   📉 Routine event (Score: {img_score}). Confined to daily digest.")
 
+# Classes that trigger iNat species hint lookup
+WILDLIFE_CLASSES = {"bird", "dog", "cat", "bear", "horse", "sheep", "cow"}
+
+
 def main():
     logging.info("🚀 Initializing Rook Engine...")
 
@@ -261,8 +266,16 @@ def main():
     cam.start()
     configure_camera_exposure(cam)
 
-    # FIX #5: Tuned MOG2 — history=200 (20s window), varThreshold=40 (more sensitive)
+    # Tuned MOG2 — history=200 (20s window), varThreshold=40 (more sensitive)
     mog = cv2.createBackgroundSubtractorMOG2(history=200, varThreshold=40, detectShadows=False)
+
+    # Boot enrichment service (weather + local species context — zero compute cost)
+    enrichment = RookEnrichment(
+        lat=float(os.environ.get("LATITUDE", "42.37")),
+        lon=float(os.environ.get("LONGITUDE", "-71.11")),
+    )
+    enrichment.start()   # Launches background threads, non-blocking
+    logging.info("🌍 Enrichment service started (weather + iNat species context)")
 
     last_alert_time = 0
     last_detected_classes = []
@@ -303,6 +316,9 @@ def main():
             fgmask = mog.apply(small_frame)
             motion_pixels = cv2.countNonZero(fgmask)
 
+            # Frame heuristics: fog / extreme low-light detection (<5ms, numpy only)
+            frame_condition = RookEnrichment.analyze_frame(frame)
+
             # Daily Digest Trigger (6 PM / 18:00)
             now_hour = datetime.now().hour
             today_date = datetime.now().strftime('%Y-%m-%d')
@@ -327,6 +343,23 @@ def main():
                     continue
 
                 emojis = translate_to_emoji_summary(detected_classes)
+
+                # Append weather emoji if conditions are notable
+                weather_emoji = enrichment.get_weather_emoji()
+                if weather_emoji and enrichment.get_weather_score_bonus() > 0:
+                    emojis = f"{emojis} {weather_emoji}"
+
+                # Append frame-level condition (fog / deep night)
+                if frame_condition:
+                    emojis = f"{emojis} {frame_condition}"
+
+                # Append species hint for wildlife classes (zero inference cost)
+                wildlife_detected = [c for c in set(detected_classes) if c in WILDLIFE_CLASSES]
+                if wildlife_detected:
+                    hint = enrichment.get_species_hint(wildlife_detected[0])
+                    if hint:
+                        emojis = f"{emojis} {hint}"
+
                 logging.info(f"   Identified: {emojis}")
 
                 # Save annotated image to tmpfs
