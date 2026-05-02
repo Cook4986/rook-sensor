@@ -50,11 +50,8 @@ SCORE_MAP = {
 
 def translate_to_emoji_summary(detected_classes):
     """
-    Applies heuristics to raw YOLO classes to match the rich Rook Emoji Vocabulary.
-    Examples:
-      - person + dog = Dog Walker 🐕🦺
-      - >3 persons = Crowd 🏟️
-      - truck = Delivery/Sanitation 📦🚚
+    Applies heuristics to raw YOLO classes. 
+    Defaults to single symbols, only adding composite clarification for anomalies (e.g. Loose Dog).
     """
     summary = []
     counts = {c: detected_classes.count(c) for c in set(detected_classes)}
@@ -62,23 +59,17 @@ def translate_to_emoji_summary(detected_classes):
     # 1. Neighborhood Patterns
     if counts.get("person", 0) > 3:
         summary.append("🏟️")
+        counts["person"] = 0
     elif counts.get("person", 0) > 1:
         summary.append("👥")
+        counts["person"] = 0
         
-    if "person" in counts and "dog" in counts:
-        summary.append("🐕🚶")
-        counts["person"] = 0 # Consume the person
-        counts["dog"] = 0    # Consume the dog
+    # 2. Anomalies (Loose Dog = dog but no person)
+    if counts.get("dog", 0) > 0 and counts.get("person", 0) == 0:
+        summary.append("🐕⚠️")
+        counts["dog"] = 0
         
-    # 2. Routine Logistics
-    if "truck" in counts:
-        summary.append("🚚")
-        counts["truck"] = 0
-    if "bus" in counts:
-        summary.append("🚌")
-        counts["bus"] = 0
-        
-    # 3. Leftovers
+    # 3. Leftovers (Single Symbols)
     for obj, count in counts.items():
         if count > 0:
             emoji = EMOJI_MAP.get(obj, f"[{obj}]")
