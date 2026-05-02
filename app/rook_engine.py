@@ -302,7 +302,7 @@ def main():
                     
                     # Run YOLO on the exact cached full-res frame that triggered the motion
                     # Upgraded to 1088px (native 1080p) for maximum visual acuity
-                    results = model(frame, imgsz=1088, conf=0.45, verbose=False)
+                    results = model(frame, imgsz=1088, conf=0.25, verbose=False)
                     
                     # Extract all classes detected (with duplicates for counting)
                     detected_classes = [results[0].names[int(c)] for c in results[0].boxes.cls]
