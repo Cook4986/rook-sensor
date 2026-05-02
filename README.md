@@ -2,9 +2,9 @@
   <img src="assets/rook_logo.png" alt="Rook" width="200">
 </p>
 
-<p align="center"><strong>Privacy-First, Visual-to-Emoji Ambient Monitor</strong></p>
+<p align="center"><strong>Privacy-First, Visual-to-Emoji Yard Monitor</strong></p>
 <p align="center">
-  Open-source edge AI on a Raspberry Pi 5 — translates activity into emoji SMS alerts.<br>
+  Open-source edge AI on a Raspberry Pi 5 — watches your yard and sends emoji alerts.<br>
   No video saved. No cloud inference. No surveillance. Just signal.
 </p>
 
@@ -16,50 +16,60 @@
 
 ## What It Does
 
-Rook is a window-mounted camera system that watches your yard and texts you emoji summaries of what's happening — `📦🚚` for a delivery, `🦌` for wildlife, `🚨` for an emergency.
+Rook is a window-mounted camera that watches your yard and sends emoji summaries of what's happening — `📦🚚` for a delivery, `🦅` for a hawk, `🐕⚠️` for a loose dog, `⛈️` during a storm.
 
 It runs 24/7 on a Raspberry Pi 5 with a Sony STARVIS sensor and [YOLOv11n](https://docs.ultralytics.com/models/yolo11/), processing everything on-device at the edge.
-
-**Why?**
 
 | Principle | How |
 |-----------|-----|
 | **Privacy by design** | No video is ever saved or transmitted. Frames exist only in RAM during inference, then are discarded. |
-| **Signal over noise** | Absorbs baseline activity. Only texts when something specific happens. |
-| **Always on, low cost** | Headless Pi + SMS. No subscriptions, no cloud GPU, no app to install. |
+| **Signal over noise** | Car-only scenes are silently counted but never alerted. Only meaningful activity fires a notification. |
+| **Always on, low cost** | Headless Pi 5 + Slack/Email. No subscriptions, no cloud GPU, no app to install. |
 
 ---
 
 ## How It Works
 
 ```
-Camera (IMX462 STARVIS)
+Camera (IMX462 STARVIS, 1920×1080)
   │
-  ▼  2–3s polling
-┌──────────────────────────────────────┐
-│  Stage 1 — Motion Gate  (MOG2)       │
-│  320×240 • zone-masked • ~3ms/cycle  │
-│                                      │
-│  No motion? → sleep. Zero YOLO cost. │
-└──────────┬───────────────────────────┘
-           │ motion detected
+  ▼  10 FPS polling
+┌──────────────────────────────────────────┐
+│  Stage 1 — Motion Gate  (MOG2)           │
+│  640×360 downscale • ~3ms/cycle          │
+│                                          │
+│  No motion? → sleep. YOLO never runs.   │
+└──────────┬───────────────────────────────┘
+           │ motion > 500px changed
            ▼
-┌──────────────────────────────────────┐
-│  Stage 2 — YOLO Inference            │
-│  640×480 • YOLOv11n • ~350ms (CPU)   │
-│                                      │
-│  State machine → emoji translation   │
-│  Rate limiter (60s min between SMS)  │
-└──────────┬───────────────────────────┘
+┌──────────────────────────────────────────┐
+│  Stage 2 — YOLO Inference                │
+│  1920×1080 (1088px) • YOLOv11n          │
+│  conf=0.25 • ~850ms (CPU-only)          │
+│                                          │
+│  → Emoji translation                     │
+│  → Silent solo filter (car-only = skip) │
+│  → 60s alert cooldown + redundancy gate │
+└──────────┬───────────────────────────────┘
            │
            ▼
-┌──────────────────────────────────────┐
-│  Twilio SMS → your phone             │
-│  "📦🚚" / "🦌" / "🚨"               │
-└──────────────────────────────────────┘
+┌──────────────────────────────────────────┐
+│  Stage 3 — Enrichment (zero CPU cost)   │
+│  • Open-Meteo weather (15-min cache)    │
+│  • iNat local species context           │
+│  • Frame fog/low-light heuristic        │
+└──────────┬───────────────────────────────┘
+           │
+           ▼
+┌──────────────────────────────────────────┐
+│  Alert Dispatch (async background)       │
+│  Slack → real-time emoji ping            │
+│  Email → high-score events (≥15 pts)    │
+│  3 AM daily digest → stats + Beast Cam  │
+└──────────────────────────────────────────┘
 ```
 
-**Net effect:** Empty street at 3 AM → YOLO never runs. Delivery at noon → SMS within 3 seconds.
+**Net effect:** Empty yard at 3 AM → YOLO never runs. Hawk in the tree → `🦅` Slack alert within 2 seconds.
 
 ---
 
@@ -68,15 +78,14 @@ Camera (IMX462 STARVIS)
 | Part | Model | Notes |
 |------|-------|-------|
 | Compute | Raspberry Pi 5 (2 GB) | Quad-core Cortex-A76 @ 2.4 GHz, headless 64-bit |
-| Sensor | [Arducam B0444](https://www.arducam.com/product/arducam-2mp-imx462/) (IMX462 STARVIS) | 2MP, fixed IR-cut, M12 mount. **Pivariety** MCU. *Note: Board is 24x25mm and lacks standard 29mm mounting holes.* |
+| Sensor | [Arducam B0444](https://www.arducam.com/product/arducam-2mp-imx462/) (IMX462 STARVIS) | 2MP, f/1.6, M12 fixed lens, 141° FOV. **Pivariety** MCU. Board is 24×25mm — no standard mounting holes. |
 | Storage | SanDisk 32 GB High Endurance | Endurance-rated for 24/7 writes |
-| Thermal | Easycargo heatsink kit | Passive aluminum + copper. ~37°C idle, ~46°C under inference. |
-| Mount | Juxiamal 41mm PVC suction cups (M5) | 4× window-mount, screw-nut style |
-| Assembly | M2.5 Standoffs / Screws | Required for Pi 5 mounting points (85mm × 56mm). Custom 3D clip needed for B0444. |
-| Power | Modular 5V/5A USB-C PD Charger | Standard laptop chargers cap at 3A. Pi 5 requires a **5V/5A** profile for full peripheral power. |
-| Power Cable | 10ft Flat 100W USB-C to USB-C Cable | Must have 5A E-Marker chip. Flat profile required to route through window sill gaps. |
+| Thermal | Easycargo heatsink kit | Passive aluminum + copper. ~53°C idle, ~67°C under inference. Hard cutoff at 80°C. |
+| Mount | Juxiamal 41mm PVC suction cups (M5) | 4× interior window glass mount |
+| Power | Modular 5V/5A USB-C PD Charger | **Required.** Standard 3A chargers cause brownouts under inference load. |
+| Power Cable | 10ft Flat 100W USB-C Cable | Must have 5A E-Marker chip. Flat profile routes through window sill gaps. |
 
-**Prototype cost:** ~$213 all-in. Full purchase history in [`device/bom.md`](device/bom.md).
+**Prototype cost:** ~$213 all-in. Full BOM in [`device/bom.md`](device/bom.md).
 
 ---
 
@@ -84,65 +93,64 @@ Camera (IMX462 STARVIS)
 
 | Layer | Technology | Notes |
 |-------|------------|-------|
-| OS | Raspberry Pi OS Lite 64-bit | Debian Trixie (or Bookworm). Headless, no desktop. |
-| Camera driver | Arducam Pivariety (`arducam-pivariety` overlay) | Patched libcamera — required for B0444 MCU. Native `imx462` overlay will not work. |
-| Python env | `~/rook-env` (venv with `--system-site-packages`) | System site-packages needed for `picamera2` / libcamera bindings. |
-| AI model | [Ultralytics YOLOv11n](https://docs.ultralytics.com/models/yolo11/) | 2.6M params, 6.5 GFLOPs. Pretrained on COCO (80 classes). `conf=0.45`. |
-| Inference | PyTorch 2.x (CPU-only, `aarch64`) | ~350ms/frame @ 640px on Cortex-A76. |
-| Vision | OpenCV (`opencv-python-headless`) | MOG2 background subtraction for motion gating. |
-| Messaging | Twilio SMS (A2P 10DLC registered) | Sole Proprietor campaign. Rate-limited: 60s min between routine sends. |
-| Remote access | [Tailscale](https://tailscale.com) | Zero-config VPN. Also serves as OTA update channel (`git pull` + `systemctl restart rook`). |
+| OS | Raspberry Pi OS Lite 64-bit (Debian Trixie) | Headless, no desktop |
+| Camera driver | Arducam Pivariety (`arducam-pivariety,cam1`) | Required for B0444 MCU — native `imx462` overlay will not work |
+| Python env | `~/rook-env` (`--system-site-packages`) | Required for `picamera2` / libcamera bindings |
+| AI model | YOLOv11n | 2.6M params, COCO 80-class, `conf=0.25`, `imgsz=1088` |
+| Inference | PyTorch CPU (`aarch64`) | ~850ms/frame @ 1088px on Cortex-A76 |
+| Motion gate | OpenCV MOG2 | `history=200`, `varThreshold=40` on 640×360 downscale |
+| Alerts | Slack Webhook + SMTP | Async dispatch — main loop never blocks |
+| Enrichment | Open-Meteo + iNat Observations API | Weather context + local species hints — no API key required |
+| Process mgmt | `systemd` (`rook.service`) | Auto-starts on boot, restarts on crash |
 
 ### OS Hardening
 
 | Measure | Purpose |
-|---------|--------|
-| `tmpfs` on `/tmp` (64 MB) and `/var/log` (32 MB) | Minimize SD card write wear for 24/7 operation |
+|---------|---------|
+| `tmpfs` on `/tmp` (64 MB) and `/var/log` (32 MB) | Minimize SD card write wear |
 | Hardware watchdog (`bcm2835_wdt`) | Auto-reboot on process or OS hang |
-| 2 GB swap file (`/swapfile`) | Prevent OOM freezes during inference |
+| 2 GB swap file | Prevent OOM during inference |
 | SSH key auth (ed25519) | Secure remote access |
 
 ---
 
 ## Quick Start
 
-> Full step-by-step with photos and troubleshooting in [`device/assembly.md`](device/assembly.md).
+> Full step-by-step with troubleshooting in [`device/assembly.md`](device/assembly.md).
 
 ### 1. Flash
 
-[Raspberry Pi Imager](https://www.raspberrypi.com/software/) → **Pi OS Lite 64-bit** (Trixie or Bookworm) → set hostname `rook`, enable SSH, configure Wi-Fi.
+[Raspberry Pi Imager](https://www.raspberrypi.com/software/) → **Pi OS Lite 64-bit (Trixie)** → hostname `rook`, SSH enabled, Wi-Fi configured.
 
 ### 2. Assemble
 
 1. Apply heatsink to SoC with thermal tape.
-2. Connect CSI cable to **CAM/DISP 1** (farther from Ethernet). Contacts face the Ethernet port.
-3. Insert SD card, stage power cable.
+2. Connect CSI cable to **CAM/DISP 1** (farther from Ethernet). Metal contacts face the Ethernet port.
+3. Insert SD card, connect power.
 
 > [!WARNING]
-> **Use CAM/DISP 1 only.** The B0444 Pivariety camera produces I2C errors (`-121 EREMOTEIO`) on CAM/DISP 0. This was confirmed through extensive debugging — see [`device/assembly.md`](device/assembly.md) for details.
+> **Use CAM/DISP 1 only.** The B0444 produces I2C errors (`-121 EREMOTEIO`) on CAM/DISP 0. See [`device/assembly.md`](device/assembly.md).
 
 ### 3. Deploy
 
 ```bash
-# From your Mac — push scripts to the Pi
+# Push files to Pi
 bash app/deploy_to_pi.sh rook@rook.local
 
-# SSH in and run the setup script
+# SSH in and run setup
 ssh rook@rook.local
-bash ~/setup_pi.sh    # Handles OS hardening, Arducam driver, Python venv
+bash ~/setup_pi.sh    # OS hardening, Arducam driver, Python venv
 sudo reboot
 ```
 
-### 4. Camera Driver (critical)
-
-The B0444 is a **Pivariety** camera — it has an onboard MCU and requires Arducam's patched libcamera. The standard `imx462` overlay will not work.
+### 4. Camera Driver
 
 ```bash
-# /boot/firmware/config.txt must contain:
+# /boot/firmware/config.txt:
 camera_auto_detect=0
 dtoverlay=arducam-pivariety,cam1
 
-# Install Arducam's patched libcamera (supports Trixie + Bookworm):
+# Install Arducam patched libcamera:
 ./install_pivariety_pkgs.sh -p libcamera_dev
 ./install_pivariety_pkgs.sh -p libcamera_apps
 ```
@@ -152,80 +160,103 @@ dtoverlay=arducam-pivariety,cam1
 ```bash
 source ~/rook-env/bin/activate
 
-# Camera test — should show arducam-pivariety [1920x1080]
-rpicam-still --list-cameras
-rpicam-still -o test.jpg --width 1920 --height 1080 -t 2000
-
-# YOLO benchmark
-python3 ~/frame_test.py --benchmark
+rpicam-still --list-cameras          # Should show arducam-pivariety [1920x1080]
+rpicam-still -o test.jpg -t 2000     # Capture test frame
+python3 ~/frame_test.py --email      # Send annotated YOLO frame to your inbox
 ```
 
-### 6. Messaging (Twilio)
-
-Rook uses Twilio for SMS delivery. US numbers require [A2P 10DLC registration](https://www.twilio.com/docs/messaging/guides/10dlc) (Sole Proprietor campaign) before messages will be delivered by carriers.
+### 6. Secrets
 
 ```bash
-# Create ~/rook-env/.env with your Twilio credentials:
-TWILIO_ACCOUNT_SID=...
-TWILIO_AUTH_TOKEN=...
-TWILIO_FROM_NUMBER=+1XXXXXXXXXX
-NOTIFY_TO_NUMBER=+1XXXXXXXXXX
+cat > ~/rook-env/.env << 'EOF'
+SLACK_WEBHOOK_URL=https://hooks.slack.com/services/...
+SMTP_SERVER=smtp.gmail.com
+SMTP_PORT=587
+SMTP_USER=your.email@gmail.com
+SMTP_PASS=your_16_char_app_password
+NOTIFY_EMAIL=your.email@gmail.com
+LATITUDE=42.37
+LONGITUDE=-71.11
+FLIP_180=1
+EOF
 ```
 
-### 7. Remote Access (Tailscale)
+### 7. Start
 
 ```bash
-curl -fsSL https://tailscale.com/install.sh | sh
-sudo tailscale up    # Opens an auth URL — approve in your browser
-tailscale ip -4      # Your device's Tailscale IP
+# Engine runs as a systemd service — auto-starts on boot
+sudo systemctl start rook.service
+sudo systemctl status rook.service    # Should show: active (running)
 ```
 
-Once connected, SSH from anywhere: `ssh rook@100.x.x.x`
+---
+
+## Alert System
+
+### Real-Time (Slack)
+Every detection with score ≥ 1 fires a Slack message. Car-only scenes are silently counted in daily stats but never alerted.
+
+### Real-Time (Email)
+High-value detections (score ≥ 15) get an email with the annotated YOLO image attached.
+
+### Daily Digest (3 AM)
+Sent every night at 3 AM — the lowest-activity window — to avoid interrupting active detection cycles:
+- **Activity totals:** Traffic, Pedestrians, Animals, Deliveries
+- **Top event of the day** with annotated image
+- **Beast Cam:** Up to 10 cropped wildlife images from the day
+- **System health:** SoC temperature, uptime
+
+### Scoring
+
+Rarer detections score higher. Score determines whether real-time email fires and ranks the daily best image.
+
+| Class | Score | Notes |
+|---|---|---|
+| `person`, `car` | 1 | Routine — Slack only |
+| `dog`, `bicycle`, `backpack` | 2 | Common |
+| `truck`, `bus`, `kite` | 5 | Notable |
+| `cat` | 10 | Uncommon |
+| `bird` | 15 | Triggers email |
+| `horse`, `sheep`, `cow` | 50 | Rare — triggers email |
+| `bear` | 100 | Critical |
+
+### Quiet Hours
+11 PM – 6 AM: routine alerts suppressed. High-score events still fire.
+
+---
+
+## Beast Cam
+
+When YOLO detects wildlife (`bird`, `dog`, `cat`, `bear`, `horse`, `sheep`, `cow`), Rook saves a cropped, padded bounding-box image to `~/beast_cam/YYYY-MM-DD/`. These are attached to the 3 AM digest and then immediately deleted from the device after successful delivery.
 
 ---
 
 ## Emoji Vocabulary
 
-| Category | Emoji | Trigger |
-|----------|-------|---------|
-| Routines | `📦🚚` | Delivery truck |
-| | `📬🚐` | Mail carrier |
-| | `🗑️🚛` | Trash collection |
-| Patterns | `👨‍👩‍👧‍👦` | Small group |
-| | `🏟️` | Large crowd / event |
-| | `🌳` | Scene clear |
-| Residential | `🧒⚽` | Kids at park |
-| | `🐕🦺` | Dog walkers |
-| Anomalies | `🦌` / `🦊` | Wildlife |
-| | `🐕⚠️` | Loose dog |
-| Emergency | `🚨` | Flashing lights — bypasses rate limits |
+Full vocabulary in [`docs/emoji_vocabulary.md`](docs/emoji_vocabulary.md).
 
-**Quiet hours:** 11 PM – 6 AM default (routine alerts suppressed, `🚨` stays active).
+| Emoji | Trigger |
+|---|---|
+| `🚶` / `👥` / `🏟️` | 1 / 2+ / 4+ people |
+| `🚗` `🚚` `🚌` `🏍️` | Car / Truck / Bus / Motorcycle |
+| `🦅` | Bird detected |
+| `🐕` / `🐕⚠️` | Dog with person / Loose dog |
+| `🐻` | Bear — critical alert |
+| `🌫️` | Fog detected (frame heuristic) |
+| `🌧️` `❄️` `⛈️` | Weather from Open-Meteo |
 
 ---
 
-## Site Context
+## Thermal Safety
 
-Rook is designed for a **2nd-floor window mount** overlooking a residential street, crosswalk, and park. Key site considerations:
-
-- **Mounting:** Lower portion of window pane, interior glass surface. Suction cups attach flush.
-- **Zone masking:** The right ~30% of the frame contains an ornamental tree — the MOG2 motion gate masks this region to suppress false positives from leaf/branch movement.
-- **Night vision:** The B0444's fixed IR-cut filter + f/1.6 equivalent aperture + Sony STARVIS sensor handles streetlit scenes well. For unlit areas, upgrade to the B0423 (motorized IR-cut).
-- **Power run:** ~2m flat USB-C cable from window sill to wall outlet.
-
----
-
-## Thermal Monitoring
-
-A background thread reads `/sys/class/thermal/thermal_zone0/temp` every 60 seconds:
+The engine reads `/sys/class/thermal/thermal_zone0/temp` every 30 seconds:
 
 | Threshold | Action |
 |-----------|--------|
-| < 60°C | 🟢 Normal — no action |
-| ≥ 75°C | 🟡 SMS warning: `⚠️ Rook thermal warning: 75°C` |
-| ≥ 85°C | 🔴 Graceful shutdown — pauses inference, sends `🌡️ Rook thermal shutdown: 85°C`, idles until < 70°C |
+| < 80°C | 🟢 Normal |
+| ≥ 80°C | 🔴 `sudo shutdown -h now` — hardware protection |
 
-Observed temps: **37°C idle**, **46°C under inference** (passive heatsink, indoor mount).
+Observed temps: **~53°C idle**, **~67°C under inference** (passive heatsink, indoor mount).
 
 ---
 
@@ -234,17 +265,20 @@ Observed temps: **37°C idle**, **46°C under inference** (passive heatsink, ind
 ```
 rook-sensor/
 ├── app/
-│   ├── frame_test.py       # FRAME viewfinder + YOLO benchmark
-│   ├── setup_pi.sh         # One-shot Pi setup (OS hardening + drivers)
+│   ├── rook_engine.py      # Main vision daemon
+│   ├── rook_weather.py     # Weather + species enrichment module
+│   ├── frame_test.py       # Viewfinder + YOLO benchmark
+│   ├── setup_pi.sh         # One-shot Pi setup
 │   └── deploy_to_pi.sh     # SCP deploy helper (run from Mac)
 ├── device/
 │   ├── assembly.md         # Step-by-step build guide
 │   └── bom.md              # Bill of materials
+├── docs/
+│   ├── emoji_vocabulary.md
+│   ├── camera_calibration.md
+│   └── refinements.md
 ├── assets/
 │   └── rook_logo.png
-├── PRIVACY.md
-├── TERMS.md
-├── LICENSE                 # MIT
 └── README.md
 ```
 
@@ -254,12 +288,12 @@ rook-sensor/
 
 | Issue | Resolution |
 |-------|------------|
-| B0444 not detected on CAM/DISP 0 | Use **CAM/DISP 1** — the B0444 Pivariety MCU only works on `cam1`. |
-| `dtoverlay=imx462` fails | B0444 is Pivariety, not native IMX462. Use `dtoverlay=arducam-pivariety,cam1`. |
-| YOLO inference ~350ms (not ~80ms) | Expected on 2 GB Pi 5 with CPU-only PyTorch. Adequate for motion-gated architecture. Upgrade path: AI HAT+ (Hailo-8L). |
-| OOM crash during ONNX export | 2 GB RAM is too tight for ONNX Runtime session optimization. Stick with PyTorch `.pt` model. |
-| Twilio SMS blocked (error 30034) | US carriers require A2P 10DLC registration. Register a Sole Proprietor campaign in Twilio Console. |
-| Pi freeze under heavy inference | Ensure 2 GB swap is configured. Avoid multi-model benchmarks in a single process. |
+| B0444 not detected on CAM/DISP 0 | Use **CAM/DISP 1** — Pivariety MCU only works on `cam1` |
+| `dtoverlay=imx462` fails | B0444 is Pivariety. Use `dtoverlay=arducam-pivariety,cam1` |
+| Solid red LED after thermal spike | Pi has shut down (80°C cutoff triggered). Power cycle to recover. Systemd restarts engine automatically after boot. |
+| YOLO inference ~850ms (not ~80ms) | Expected on CPU-only Pi 5. Adequate for motion-gated architecture. Upgrade: Hailo-8L HAT+. |
+| OOM crash during ONNX export | 2 GB RAM too tight for ONNX session optimization. Use PyTorch `.pt` model. |
+| 5V/3A charger causes brownouts | Pi 5 requires **5V/5A** under inference load. See Hardware section. |
 
 ---
 
@@ -268,36 +302,31 @@ rook-sensor/
 - [x] Hardware assembly + camera validation
 - [x] OS hardening (tmpfs, watchdog, SSH keys)
 - [x] Arducam Pivariety driver + first light (1920×1080 @ 60fps)
-- [x] YOLOv11n benchmark (~350ms CPU-only)
-- [x] Tailscale VPN remote access
-- [x] Twilio account + A2P 10DLC registration (Fallback/SMS)
-- [x] Slack Webhook integration (Primary real-time alerts)
-- [x] MOG2 fast motion loop + zone masking
-- [x] Detection → emoji state machine + alert rate limiter
-- [x] Quiet hours + daily 6 PM SMTP log/image digest
-- [x] Thermal monitor (Hard cutoff at 80°C to prevent hardware damage)
-- [ ] `rook.service` — systemd unit for boot persistence + crash recovery
-- [ ] Next.js dashboard (Supabase + Vercel)
-- [ ] v2 housing (3D-printed enclosure, silicone suction cups)
-- [ ] AI HAT+ upgrade (Hailo-8L, 13 TOPS → native 1080p @ 30fps)
-
-### Upgrade Path
-
-The Pi 5's PCIe slot supports the [Raspberry Pi AI HAT+](https://www.raspberrypi.com/products/ai-hat-plus/) (Hailo-8L, 13 TOPS, ~$26). This snap-on accelerator would enable:
-- Sub-10ms YOLOv11n inference (vs. ~350ms CPU)
-- Continuous real-time monitoring without the MOG2 motion gate
-- Heavier models (YOLOv8s, segmentation) or multi-camera pipelines
-
-No housing, power, or software architecture changes required.
+- [x] YOLOv11n inference pipeline (1088px, conf=0.25)
+- [x] MOG2 motion gate (640×360, 500px threshold)
+- [x] Emoji translation + alert scoring
+- [x] Async Slack + Email alert dispatch
+- [x] Quiet hours suppression
+- [x] Thermal hard cutoff at 80°C
+- [x] Silent solo filter (car-only scenes counted, not alerted)
+- [x] Weather enrichment (Open-Meteo, zero API key)
+- [x] Local species context (iNat Observations API)
+- [x] Beast Cam wildlife crop cache + daily digest
+- [x] Daily stats (Traffic / Pedestrians / Animals / Deliveries)
+- [x] `rook.service` systemd unit — auto-start on boot, crash recovery
+- [ ] Tailscale VPN — remote SSH from anywhere
+- [ ] Custom PETG enclosure (Zoo CAD — see `docs/enclosure_spec.md`)
+- [ ] Hailo-8L AI Accelerator HAT+ (13 TOPS → 30fps continuous, no motion gate needed)
+- [ ] Next.js dashboard (Supabase + Vercel — remote config + live feed)
 
 ---
 
 ## Transparency
 
-Rook is built in the open. The entire hardware build, software stack, and design rationale are documented in this repo. Privacy is a core architectural constraint — no raw video is ever saved or transmitted by design.
+Rook is built in the open. Privacy is a core architectural constraint — no raw video is ever saved or transmitted.
 
-- [Privacy Policy](PRIVACY.md) — what Rook does and doesn't collect
-- [Terms and Conditions](TERMS.md) — SMS program details, intended use
+- [Privacy Policy](PRIVACY.md)
+- [Terms and Conditions](TERMS.md)
 
 ## License
 

@@ -1,71 +1,110 @@
 # Rook Emoji Vocabulary
 
-Rook translates real-world activity into a compact, low-bandwidth emoji vocabulary. This ensures privacy (no video transmission) and rapid visual parsing.
+Rook translates yard activity into a compact emoji vocabulary. No video is transmitted — only symbols. Designed for instant recognition on a phone lock screen.
 
-*Note: In v1.1, the engine was refactored to prioritize pure, single-symbol emojis. Composite emojis (e.g. Dog + Walker) are broken apart into their base components (`🐕 x1 🚶 x1`) for at-a-glance legibility. Secondary symbols are only used for critical anomaly clarification.*
+> **Philosophy:** One symbol per object class. Composite emojis only for critical anomalies (e.g. `🐕⚠️` = loose dog). Counts shown inline: `🚗 x3`.
 
-## 1. Core Logistics & Vehicles
-| Emoji | YOLO Class | Translation / Context |
+---
+
+## 1. Vehicles
+
+| Emoji | YOLO Class | Notes |
 | :---: | :--- | :--- |
-| `🚗` | `car` | Standard passenger vehicle |
+| `🚗` | `car` | Standard passenger vehicle. **Silent** — counted in daily stats but no real-time alert when appearing alone. |
 | `🚚` | `truck` | Delivery, utility, or sanitation truck |
-| `🚌` | `bus` | School bus or public transit |
+| `🚌` | `bus` | School bus or transit |
 | `🏍️` | `motorcycle` | Motorcycle or moped |
-| `🚲` | `bicycle` | Bicycle passing by |
+| `🚲` | `bicycle` | Bicycle. **Silent** when alone. |
 
-## 2. Pedestrian Patterns
-| Emoji | YOLO Class | Translation / Context |
+---
+
+## 2. Pedestrians
+
+| Emoji | YOLO Class | Notes |
 | :---: | :--- | :--- |
-| `🚶` | `person` | Single pedestrian |
-| `👥` | `person` (>1) | Small group or couple passing by |
-| `🏟️` | `person` (>3) | Large crowd or heavy foot traffic |
+| `🚶` | `person` (1) | Single pedestrian |
+| `👥` | `person` (2–3) | Small group |
+| `🏟️` | `person` (4+) | Crowd or event |
 | `🎒` | `backpack` | Student or hiker |
-| `🧳` | `suitcase` | Traveler / someone moving |
+| `🧳` | `suitcase` | Traveler |
 | `☂️` | `umbrella` | Pedestrian in rain |
-| `📱` | `cell phone`| Pedestrian lingering on their phone |
+| `📱` | `cell phone` | Pedestrian lingering on phone |
 
-## 3. Park & Recreation (COCO Ecosystem Additions)
-| Emoji | YOLO Class | Translation / Context |
+---
+
+## 3. Yard & Recreation
+
+| Emoji | YOLO Class | Notes |
 | :---: | :--- | :--- |
-| `🛹` | `skateboard` | Skateboarder on sidewalk |
-| `⚽` | `sports ball`| Kids playing in the street/yard |
+| `🛹` | `skateboard` | Skateboarder |
+| `⚽` | `sports ball` | Kids playing in yard |
 | `🥏` | `frisbee` | Yard recreation |
 | `🪁` | `kite` | Park recreation |
 
+---
+
 ## 4. Wildlife & Anomalies
-*Note: High-scoring anomalies automatically bypass standard email rate limits.*
 
-| Emoji | YOLO Class | Translation / Context |
+> High-scoring anomalies bypass standard cooldowns and trigger real-time email with attached image.
+
+| Emoji | YOLO Class | Score | Notes |
+| :---: | :--- | :---: | :--- |
+| `🐕` | `dog` (with person) | 2 | Accompanied dog |
+| `🐕⚠️` | `dog` (no person) | 2 | **Anomaly:** Loose, off-leash dog |
+| `🐈` | `cat` | 10 | Feline in yard |
+| `🦅` | `bird` | 15 | Hawk, owl, crow, etc. |
+| `🦌` | `sheep` / `cow` | 50 | **Heuristic:** Suburban large wildlife remapped to Deer |
+| `🐻` | `bear` | 100 | **Critical** — immediate email |
+| `🐎` | `horse` | 50 | Equestrian activity |
+
+| Emoji | Event | Notes |
 | :---: | :--- | :--- |
-| `🐕` | `dog` | Dog (accompanied by person) |
-| `🐕⚠️` | `dog` (no person)| **Anomaly:** Loose, off-leash dog |
-| `🐈` | `cat` | Feline roaming |
-| `🦅` | `bird` | Large bird (hawk, owl, crow) |
-| `🦌` | `sheep`/`cow` | **Heuristic Map:** Suburban large wildlife (Deer) |
-| `🐻` | `bear` | **Critical Anomaly:** Bear in perimeter |
-| `🐎` | `horse` | Equestrian activity |
-
-| Emoji | Event | Translation |
-| :---: | :--- | :--- |
-| `🚨🚓` | Emergency Responders | "Flashing lights detected (Police/Fire/Ambulance)." |
-| `🚧🚗` | Spatial Violation | "A vehicle has breached the sidewalk or park boundary." |
-| `⚠️🌡️` | Thermal Warning | "System temperature reached 75°C. Monitor closely." |
-| `🔴🔥` | Thermal Shutdown | "System temperature reached 85°C. Inference suspended to prevent damage." |
-| `🔋📉` | Low Voltage | "Under-voltage detected from the power supply (⚡ icon)." |
-
-## 5. Weather & Environmental Conditions
-*Note: These require future integration with either visual heuristics (e.g., detecting snow accumulation) or a local weather API.*
-
-| Emoji | Event | Translation |
-| :---: | :--- | :--- |
-| `🌧️☔` | Heavy Rain | "Heavy rainfall or downpour detected." |
-| `❄️⛄` | Snow/Blizzard | "Snowfall or significant snow accumulation." |
-| `🌫️👀` | Dense Fog | "Visibility is severely reduced due to fog." |
-| `💨🍃` | High Winds | "Strong winds (detected via severe branch movement)." |
-| `⛈️⚡` | Thunderstorm | "Lightning flashes or severe storm conditions." |
-| `🌅` / `🌇` | Sunrise/Sunset | "Transition between day/night vision modes." |
-| `🌈` | Rainbow | "A rainbow is visible in the sky." |
-| `✨🌌` | Clear Night | "High visibility night sky (stars visible)." |
+| `🐕⚠️` | Loose dog (no person in scene) | Triggers real-time alert |
+| `🚨🚓` | Emergency responders | Flashing lights in yard |
 
 ---
-*Note: Emergency alerts (`🚨`, `🚧`) include a secure, time-limited link to an anonymized bounding-box frame for visual verification.*
+
+## 5. Weather & Environmental
+
+Populated automatically from [Open-Meteo](https://open-meteo.com) (free, no API key) every 15 minutes, and from frame-level vision heuristics.
+
+| Emoji | Source | Trigger |
+| :---: | :--- | :--- |
+| `☀️` | Open-Meteo WMO 0 | Clear sky |
+| `⛅` | Open-Meteo WMO 2 | Partly cloudy |
+| `🌦️` | Open-Meteo WMO 51/80 | Light drizzle / showers |
+| `🌧️` | Open-Meteo WMO 61–65 | Rain |
+| `❄️` | Open-Meteo WMO 71–77 | Snow |
+| `⛈️⚡` | Open-Meteo WMO 95–99 | Thunderstorm |
+| `🌫️` | Frame heuristic | High luminance + low contrast std → fog |
+| `🌑` | Frame heuristic | Mean luminance < 28 → lens blocked or deep night |
+
+> Weather emojis only appear in alerts when the WMO score bonus > 0 (i.e. notable conditions, not clear sky).
+
+---
+
+## 6. System Events
+
+| Emoji | Event | Notes |
+| :---: | :--- | :--- |
+| `🌡️` | Thermal warning | Appended to alert at high temp |
+| `🔴🔥` | Thermal shutdown | `sudo shutdown -h now` at 80°C |
+| `🔋📉` | Under-voltage | ⚡ icon visible on Pi — upgrade to 5V/5A charger |
+
+---
+
+## Alert Scoring
+
+Score determines whether a real-time email fires and ranks the daily digest "top event."
+
+```
+score = Σ (base_score × count^1.5) + (unique_classes × 5)
+```
+
+| Score | Action |
+|---|---|
+| ≥ 1 | Slack ping (unless silent solo class) |
+| ≥ 15 | Slack + Email with attached image |
+| ≥ 50 | Slack + Email — rare/critical event |
+
+**Silent solo classes:** `car`, `bicycle` — counted in daily traffic totals but no real-time notification when appearing alone. Mixed scenes (e.g. `car + person`) are not suppressed.

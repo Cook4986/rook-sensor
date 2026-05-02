@@ -1,39 +1,64 @@
-# Rook v2: Design & Development Refinements
+# Rook v2: Refinements & Known Issues
 
-Based on the prototyping, assembly, and testing phases of the initial Rook build, several hardware and software refinements have been identified. These should be considered for the v2 "Production" build.
+Identified hardware and software improvements from prototyping, assembly, and live testing (May 2026).
 
-## Hardware & Mechanical Refinements
+---
 
-1. **Power Supply & Cabling**
-   - **Issue:** The combination of a 15W USB-A QuickCharge 3.0 power brick and a 10-foot flat USB cable resulted in voltage drop (brownouts) when the Pi 5 CPU spiked to 100% during YOLO inference, causing the PMIC to halt the system (solid red LED).
-   - **Recommendation:** Use an official Raspberry Pi 27W USB-C PD power supply, or a high-quality USB-C PD source with a short, thick-gauge cable to ensure stable 5V/5A delivery.
+## Hardware
 
-2. **Mounting the Arducam B0444**
-   - **Issue:** The Arducam IMX462 sensor board is extremely compact (24mm × 25mm) and lacks the standard 29mm mounting holes found on standard Raspberry Pi camera modules.
-   - **Recommendation:** A custom 3D-printed enclosure is required. The enclosure must grip the sensor board by its edges or secure the threaded M12 lens barrel directly, as traditional M2/M2.5 standoffs cannot be used on the board itself.
+### 1. Power Supply — **Resolved in v1.1**
+- **Issue:** USB-A QC 3.0 (15W) + 10ft flat cable caused brownouts when YOLO inference spiked CPU to 100%, triggering a PMIC halt (solid red LED).
+- **Resolution:** Upgrade to a **5V/5A USB-C PD** charger + flat 100W cable with 5A E-Marker chip. Standard 3A chargers are insufficient.
 
-3. **Raspberry Pi 5 Assembly**
-   - **Issue:** The Pi 5 requires M2.5 screws/standoffs for its 85mm × 56mm mounting pattern, which were not initially listed in the BOM.
-   - **Recommendation:** Add an M2.5 standoff kit to the required hardware list for secure window-mount bracket assembly.
+### 2. Arducam B0444 Mounting
+- **Issue:** The B0444 PCB is 24×25mm with no standard mounting holes. Cannot use M2/M2.5 standoffs.
+- **Resolution:** Custom PETG enclosure required. Camera seats in a friction-fit aperture channel (14mm lens barrel clearance, 26×27mm retention channel). See `docs/enclosure_spec.md`.
 
-4. **Thermal Management**
-   - **Issue:** YOLOv11n inference running on the Cortex-A76 CPU generates rapid heat spikes. While the passive Easycargo heatsink kept idle temps around 37°C, sustained inference pushes it past 46°C.
-   - **Recommendation:** If transitioning to a sealed enclosure, passive cooling will be insufficient. We must either add a micro-blower fan (driven by the Pi 5 fan header) or upgrade to the Hailo-8L AI Accelerator HAT+, which offloads inference and drastically reduces SoC thermal load.
+### 3. Raspberry Pi 5 Standoffs
+- **Issue:** Pi 5 requires M2.5 screws/standoffs for its 85×56mm mounting pattern — not included in original BOM.
+- **Resolution:** Add M2.5 standoff kit to BOM. Required for secure enclosure assembly.
 
-## Software & Logic Refinements
+### 4. Thermal Management
+- **Issue:** YOLO inference on Cortex-A76 causes rapid heat spikes. Observed 67°C under sustained inference, 53°C idle. Hard shutdown at 80°C.
+- **Mitigations applied:**
+  - Thermal reads rate-limited to every 30s (not per-frame)
+  - Inference runs in the main loop; alerts dispatch async to avoid CPU spikes from blocking SMTP/Slack
+- **v2 Resolution:** Hailo-8L AI Accelerator HAT+ offloads inference entirely, reducing SoC thermal load to near-idle.
 
-1. **Intelligent Exposure Polling (Lux Integration)**
-   - **Issue:** Currently, day/night exposure is determined purely by mathematical sunrise/sunset tables (`suntime` package). While highly efficient, this does not account for heavy overcast days or bright artificial streetlights.
-   - **Recommendation:** Implement a background thread that periodically polls the camera's actual `Lux` or `AnalogueGain` metadata and adjusts the `ExposureValue` dynamically. This should run independently of the motion loop (e.g., once every 10 minutes) to avoid CPU overhead during active tracking.
+---
 
-2. **Heuristic Grouping Upgrades**
-   - **Issue:** Standard COCO datasets classify wildlife poorly (e.g., foxes as dogs, deer as sheep).
-   - **Recommendation:** Since retraining YOLOv11 on a custom dataset is expensive, build advanced post-processing heuristics. For example, if YOLO detects a "sheep" or "cow" in a residential suburban zone, the translation layer should aggressively remap it to `🦌` (Deer).
+## Software
 
-3. **Masking & Ghost Motion Rejection**
-   - **Issue:** MOG2 background subtraction is highly sensitive to wind blowing through trees or shadows moving across the street.
-   - **Recommendation:** Implement a polygon-based inclusion zone instead of a simple rectangular exclusion mask. Allow the user to draw a geometric polygon (via the web dashboard) specifying *exactly* where the street and sidewalk are.
+### 1. Exposure Scheduling
+- **Current:** Day/night exposure set by `suntime` sunrise/sunset tables, re-evaluated every 10 minutes.
+- **Limitation:** Doesn't account for heavy overcast or bright artificial lighting.
+- **v2:** Poll camera `AnalogueGain` metadata to dynamically adjust `ExposureValue` independent of the motion loop.
 
-4. **Web Dashboard Integration (Pending)**
-   - **Issue:** Setup and calibration currently require SSH terminal access.
-   - **Recommendation:** Complete the `rook-dashboard` Next.js interface. The dashboard should securely interface with a local Flask/FastAPI server on the Pi to stream the viewfinder, manage the `.env` file remotely, and draw the MOG2 exclusion zones.
+### 2. Wildlife Species Resolution
+- **Current:** COCO classifies all wildlife into generic classes (`bird`, `dog`, `sheep`). Rook adds a local species context hint from the iNat Observations API at startup (e.g. `🦅 (locally: Red-tailed Hawk, Canada Goose)`).
+- **Limitation:** Hint is a lookup, not inference — all birds get the same hint list regardless of what's in frame.
+- **v2 (post-Hailo):** Run EfficientNet-B0 on Beast Cam crops nightly for species-level ID in the daily digest.
+
+### 3. Beast Cam
+- **Current:** YOLO-detected wildlife bounding boxes are cropped and cached to `~/beast_cam/YYYY-MM-DD/` in real-time (async, no inference cost). Attached to 3 AM digest (max 10 crops). Deleted from device on successful delivery.
+- **Limitation:** No on-device species classification yet.
+- **v2:** Batch species ID at 3 AM using cached crops.
+
+### 4. Web Dashboard
+- **Current:** Setup and calibration require SSH terminal access.
+- **v2:** `rook-dashboard` (Next.js + Supabase + Vercel) for remote `.env` management, viewfinder, and threshold tuning without SSH.
+
+---
+
+## Resolved Issues (closed)
+
+| Issue | Resolution |
+|---|---|
+| B0444 produces I2C errors on CAM/DISP 0 | Use **CAM/DISP 1** — Pivariety MCU only enumerated on `cam1` |
+| `dtoverlay=imx462` fails | B0444 requires `dtoverlay=arducam-pivariety,cam1` + Arducam patched libcamera |
+| Slack/email blocking main loop | All alert dispatch moved to async daemon threads |
+| BGR→RGB color confusion in YOLO | Explicit `cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)` before inference |
+| Engine dies on reboot | `rook.service` systemd unit — enabled, auto-restarts on crash |
+| MOG2 zone masking (tree) | **Removed from roadmap** — tree contains wildlife, masking defeats purpose |
+| Car-only notifications | `SILENT_SOLO_CLASSES = {"car", "bicycle"}` — counted in stats, not alerted |
+| Daily digest at 6 PM interrupts captures | Moved to 3 AM (`DIGEST_HOUR = 3`) — lowest activity window |
