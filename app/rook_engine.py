@@ -22,7 +22,7 @@ MOTION_THRESHOLD_PIXELS = 500   # Lowered: distant pedestrians ~500px at 640x360
 COOLDOWN_SECONDS = 60           # Minimum seconds between ALERTS (not between inference)
 QUIET_HOURS_START = 23          # 11 PM
 QUIET_HOURS_END = 6             # 6 AM
-MIN_EMAIL_SCORE = 15            # Score threshold for real-time email/MMS alerts
+MIN_EMAIL_SCORE = 20            # Score threshold for real-time email/MMS — unusual wildlife, rare events
 MIN_SLACK_SCORE = 1             # Score threshold for lightweight Slack pings
 THERMAL_CHECK_INTERVAL = 30     # Seconds between SoC temp reads (not per-frame)
 DIGEST_HOUR = 3                 # 3 AM — mathematically least-active hour, minimizes missed captures
@@ -49,15 +49,38 @@ EMOJI_MAP = {
     "bear": "🐻", "horse": "🐎", "sheep": "🐑", "cow": "🐄"
 }
 
-# ── Rarity Scores (daily digest ranking + alert gating) ───────────────────────
+# ── Rarity Scores — calibrated to suburban yard context ──────────────────────
+# Score = how surprising is this sighting in an urban/suburban yard?
+# Slack fires at MIN_SLACK_SCORE. Email fires at MIN_EMAIL_SCORE.
 SCORE_MAP = {
-    "person": 1, "car": 1, "dog": 2, "bicycle": 2,
-    "truck": 5, "bus": 5, "motorcycle": 3,
-    "skateboard": 3, "sports ball": 3, "frisbee": 3, "kite": 5,
-    "suitcase": 5, "cell phone": 5, "backpack": 2, "umbrella": 2,
-    "cat": 10, "bird": 15,
-    "bear": 100, "horse": 50, "sheep": 50, "cow": 50
+    # Routine yard/street activity (Slack-only, score 1–8)
+    "person":       2,   # Pedestrian — common
+    "bird":         3,   # Robin, sparrow, crow — frequent yard visitor
+    "dog":          4,   # Dog walker — common
+    "backpack":     3,   # Student/hiker
+    "umbrella":     3,   # Pedestrian in rain
+    "cell phone":   2,   # Someone on phone
+    "motorcycle":   4,   # Road traffic
+    "truck":        4,   # Delivery/utility
+    "bus":          4,   # Transit
+    # Notable (score 5–15)
+    "skateboard":   5,
+    "sports ball":  5,   # Kids playing
+    "frisbee":      6,
+    "kite":         8,
+    "suitcase":     8,   # Traveler / someone moving
+    "cat":         12,   # Less common yard visitor
+    # Unusual — email-worthy (score 20+)
+    "sheep":       30,   # Suburban → Deer heuristic
+    "cow":         30,   # Large wildlife
+    "horse":       30,   # Very unusual in urban yard
+    # Critical
+    "bear":       100,   # Immediate action
+    # Silent solo (suppressed before scoring — base score irrelevant)
+    "car":          1,
+    "bicycle":      1,
 }
+
 
 # ── Daily Stats Category Membership ──────────────────────────────────────────
 TRAFFIC_CLASSES     = {"car", "truck", "bus", "motorcycle", "bicycle"}
@@ -69,7 +92,7 @@ WILDLIFE_CLASSES    = ANIMAL_CLASSES  # Alias used for Beast Cam crop caching
 # Classes that are too routine for real-time alerts when appearing SOLO.
 # A scene containing ONLY these classes is counted in stats but never Slacked/emailed.
 # Mixed scenes (e.g. car + person) are NOT suppressed.
-SILENT_SOLO_CLASSES = {"car", "bicycle"}
+SILENT_SOLO_CLASSES = {"car", "bicycle", "bird"}
 
 
 # ── Translation Heuristics ────────────────────────────────────────────────────
