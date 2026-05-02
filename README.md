@@ -4,7 +4,7 @@
 
 <p align="center"><strong>Privacy-First, Visual-to-Emoji Ambient Monitor</strong></p>
 <p align="center">
-  Open-source edge AI on a Raspberry Pi 5 — translates street activity into emoji SMS alerts.<br>
+  Open-source edge AI on a Raspberry Pi 5 — translates activity into emoji SMS alerts.<br>
   No video saved. No cloud inference. No surveillance. Just signal.
 </p>
 
