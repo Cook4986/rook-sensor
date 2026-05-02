@@ -38,6 +38,14 @@ EMOJI_MAP = {
     "bear": "🐻", "horse": "🐎", "sheep": "🐑", "cow": "🐄"
 }
 
+# Base Scores for Anomalies
+SCORE_MAP = {
+    "person": 1, "car": 1, "dog": 2, "bicycle": 2,
+    "truck": 5, "bus": 5, "motorcycle": 3,
+    "cat": 10, "bird": 15,
+    "bear": 100, "horse": 50, "sheep": 50, "cow": 50
+}
+
 def translate_to_emoji_summary(detected_classes):
     """
     Applies heuristics to raw YOLO classes to match the rich Rook Emoji Vocabulary.
@@ -96,6 +104,20 @@ def is_quiet_hours():
     else: # Handles overnight wraps (e.g. 23 to 6)
         return hour >= QUIET_HOURS_START or hour < QUIET_HOURS_END
 
+def calculate_image_score(detected_classes):
+    """Assigns a rarity score to an image based on the YOLO detections."""
+    score = 0
+    counts = {c: detected_classes.count(c) for c in set(detected_classes)}
+    
+    for obj, count in counts.items():
+        base = SCORE_MAP.get(obj, 1)
+        # Multiplier for multiple objects of the same type (e.g. 3 dogs = rarer than 1)
+        score += base * (count ** 1.5)
+        
+    # Bonus for complex scenes (many different types of objects)
+    score += len(counts) * 5
+    return int(score)
+
 def configure_camera_exposure(cam):
     """Sets camera EV and limits based on day/night."""
     if is_daytime():
@@ -105,8 +127,8 @@ def configure_camera_exposure(cam):
         cam.set_controls({"ExposureValue": 1.0, "FrameDurationLimits": (33333, 100000)})
         logging.info("🌙 Camera locked to Nighttime Exposure")
 
-def send_daily_digest(notify_email):
-    """Compiles the daily log file and emails it at 6 PM."""
+def send_daily_digest(notify_email, best_image_data):
+    """Compiles the daily log file and emails it at 6 PM, including the most interesting photo."""
     try:
         logging.info("Generating daily 6 PM digest...")
         smtp_server = os.environ.get("SMTP_SERVER")
@@ -125,7 +147,19 @@ def send_daily_digest(notify_email):
         msg["Subject"] = f"Rook Daily Digest - {datetime.now().strftime('%Y-%m-%d')}"
         msg["From"] = smtp_user
         msg["To"] = notify_email
-        msg.set_content(f"Rook System Logs for the day:\n\n{logs}")
+        
+        body = f"Rook System Logs for the day:\n\n{logs}"
+        if best_image_data["path"] and os.path.exists(best_image_data["path"]):
+            body = f"🏆 Top Activity of the Day: {best_image_data['summary']} (Score: {best_image_data['score']})\n\n" + body
+            
+        msg.set_content(body)
+
+        # Attach the best image if we recorded one
+        if best_image_data["path"] and os.path.exists(best_image_data["path"]):
+            ctype, encoding = mimetypes.guess_type(best_image_data["path"])
+            maintype, subtype = (ctype or "image/jpeg").split("/", 1)
+            with open(best_image_data["path"], "rb") as f:
+                msg.add_attachment(f.read(), maintype=maintype, subtype=subtype, filename="daily_highlight.jpg")
 
         with smtplib.SMTP(smtp_server, smtp_port) as server:
             server.starttls()
@@ -209,6 +243,9 @@ def main():
     last_daytime_check = time.time()
     last_digest_date = None
     
+    # State for the daily "best image" competition
+    best_daily_image = {"score": 0, "path": None, "summary": ""}
+    
     logging.info("🛡️ Rook is armed and watching...")
     
     try:
@@ -234,8 +271,10 @@ def main():
             now_hour = datetime.now().hour
             today_date = datetime.now().strftime('%Y-%m-%d')
             if now_hour == 18 and last_digest_date != today_date:
-                send_daily_digest(os.environ.get("NOTIFY_EMAIL"))
+                send_daily_digest(os.environ.get("NOTIFY_EMAIL"), best_daily_image)
                 last_digest_date = today_date
+                # Reset best image for the new day
+                best_daily_image = {"score": 0, "path": None, "summary": ""}
                 
             # Periodically re-evaluate day/night exposure (every 10 mins)
             if time.time() - last_daytime_check > 600:
@@ -267,6 +306,14 @@ def main():
                     annotated = results[0].plot()
                     out_path = "/tmp/rook_alert.jpg"
                     cv2.imwrite(out_path, annotated)
+                    
+                    # Score image for the daily digest competition
+                    img_score = calculate_image_score(detected_classes)
+                    if img_score > best_daily_image["score"]:
+                        best_path = "/tmp/rook_best_daily.jpg"
+                        cv2.imwrite(best_path, annotated)
+                        best_daily_image = {"score": img_score, "path": best_path, "summary": emojis}
+                        logging.info(f"   🏆 New Daily High Score: {img_score}!")
                     
                     # Dispatch logic
                     if not is_quiet_hours():
