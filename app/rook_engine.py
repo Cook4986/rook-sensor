@@ -5,6 +5,7 @@ import smtplib
 from email.message import EmailMessage
 import mimetypes
 from datetime import datetime, timezone
+import logging
 from dotenv import load_dotenv
 from picamera2 import Picamera2
 from ultralytics import YOLO
@@ -19,13 +20,21 @@ MOTION_THRESHOLD_PIXELS = 3000  # How many pixels must change to trigger YOLO
 COOLDOWN_SECONDS = 60           # Minimum seconds between alerts
 QUIET_HOURS_START = 23          # 11 PM
 QUIET_HOURS_END = 6             # 6 AM
+LOG_FILE = os.path.expanduser("~/rook.log")
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler(LOG_FILE),
+        logging.StreamHandler() # Also print to console
+    ]
+)
 
 # Base YOLO COCO to Emoji map
 EMOJI_MAP = {
     "person": "🚶", "backpack": "🎒", "umbrella": "☂️",
     "bicycle": "🚲", "car": "🚗", "motorcycle": "🏍️",
     "bus": "🚌", "truck": "🚚",
-    "dog": "🐕", "cat": "🐈", "bird": "🦅",
     "bear": "🐻", "horse": "🐎", "sheep": "🐑", "cow": "🐄"
 }
 
@@ -91,10 +100,46 @@ def configure_camera_exposure(cam):
     """Sets camera EV and limits based on day/night."""
     if is_daytime():
         cam.set_controls({"ExposureValue": 0.0, "FrameDurationLimits": (33333, 33333)})
-        print("☀️  Camera locked to Daytime Exposure")
+        logging.info("☀️  Camera locked to Daytime Exposure")
     else:
         cam.set_controls({"ExposureValue": 1.0, "FrameDurationLimits": (33333, 100000)})
-        print("🌙 Camera locked to Nighttime Exposure")
+        logging.info("🌙 Camera locked to Nighttime Exposure")
+
+def send_daily_digest(notify_email):
+    """Compiles the daily log file and emails it at 6 PM."""
+    try:
+        logging.info("Generating daily 6 PM digest...")
+        smtp_server = os.environ.get("SMTP_SERVER")
+        smtp_port = int(os.environ.get("SMTP_PORT", 587))
+        smtp_user = os.environ.get("SMTP_USER")
+        smtp_pass = os.environ.get("SMTP_PASS")
+        
+        if not all([smtp_server, smtp_user, smtp_pass, notify_email]):
+            logging.error("Missing SMTP credentials for daily digest.")
+            return
+
+        with open(LOG_FILE, "r") as f:
+            logs = f.read()
+
+        msg = EmailMessage()
+        msg["Subject"] = f"Rook Daily Digest - {datetime.now().strftime('%Y-%m-%d')}"
+        msg["From"] = smtp_user
+        msg["To"] = notify_email
+        msg.set_content(f"Rook System Logs for the day:\n\n{logs}")
+
+        with smtplib.SMTP(smtp_server, smtp_port) as server:
+            server.starttls()
+            server.login(smtp_user, smtp_pass)
+            server.send_message(msg)
+            
+        logging.info(f"📧 Daily digest sent to {notify_email}")
+        
+        # Clear log after sending
+        with open(LOG_FILE, "w") as f:
+            f.write(f"--- Rook Log Reset ({datetime.now().strftime('%Y-%m-%d %H:%M:%S')}) ---\n")
+            
+    except Exception as e:
+        logging.error(f"❌ Failed to send daily digest: {e}")
 
 def send_email_alert(emoji_summary, image_path):
     """Dispatch alert via SMTP fallback."""
@@ -139,15 +184,15 @@ def send_slack_alert(emoji_summary):
     try:
         payload = {"text": f"Rook Activity: {emoji_summary}"}
         httpx.post(webhook_url, json=payload, timeout=5.0)
-        print("💬 Slack alert sent!")
+        logging.info("💬 Slack alert sent!")
     except Exception as e:
-        print(f"❌ Failed to send Slack alert: {e}")
+        logging.error(f"❌ Failed to send Slack alert: {e}")
 
 def main():
-    print("🚀 Initializing Rook Engine...")
+    logging.info("🚀 Initializing Rook Engine...")
     
     # 1. Boot YOLO
-    print("🧠 Loading YOLOv11n...")
+    logging.info("🧠 Loading YOLOv11n...")
     model = YOLO("yolo11n.pt")
     
     # 2. Boot Camera in Video Mode
@@ -157,13 +202,14 @@ def main():
     configure_camera_exposure(cam)
     
     # 3. Initialize MOG2 Subtractor
-    # history=500 frames, varThreshold=50 (higher = less sensitive to noise)
     mog = cv2.createBackgroundSubtractorMOG2(history=500, varThreshold=50, detectShadows=False)
     
     last_alert_time = 0
     flip_180 = os.environ.get("FLIP_180", "1") == "1"
+    last_daytime_check = time.time()
+    last_digest_date = None
     
-    print("🛡️ Rook is armed and watching...")
+    logging.info("🛡️ Rook is armed and watching...")
     
     try:
         while True:
@@ -184,12 +230,24 @@ def main():
             # Calculate amount of motion
             motion_pixels = cv2.countNonZero(fgmask)
             
+            # Daily Digest Trigger (6 PM / 18:00)
+            now_hour = datetime.now().hour
+            today_date = datetime.now().strftime('%Y-%m-%d')
+            if now_hour == 18 and last_digest_date != today_date:
+                send_daily_digest(os.environ.get("NOTIFY_EMAIL"))
+                last_digest_date = today_date
+                
+            # Periodically re-evaluate day/night exposure (every 10 mins)
+            if time.time() - last_daytime_check > 600:
+                configure_camera_exposure(cam)
+                last_daytime_check = time.time()
+            
             if motion_pixels > MOTION_THRESHOLD_PIXELS:
                 now = time.time()
                 
                 # Check rate limit cooldown
                 if now - last_alert_time > COOLDOWN_SECONDS:
-                    print(f"🚨 Motion Detected ({motion_pixels} px)! Running YOLO...")
+                    logging.info(f"🚨 Motion Detected ({motion_pixels} px)! Running YOLO...")
                     
                     # Run YOLO on the full-res frame
                     results = model(frame, imgsz=640, conf=0.45, verbose=False)
@@ -198,12 +256,12 @@ def main():
                     detected_classes = [results[0].names[int(c)] for c in results[0].boxes.cls]
                     
                     if not detected_classes:
-                        print("   Ghost motion (no objects found). Ignored.")
+                        logging.info("   Ghost motion (no objects found). Ignored.")
                         continue
                         
                     # Translate to rich emoji summary
                     emojis = translate_to_emoji_summary(detected_classes)
-                    print(f"   Identified: {emojis}")
+                    logging.info(f"   Identified: {emojis}")
                     
                     # Save annotated image
                     annotated = results[0].plot()
@@ -215,7 +273,7 @@ def main():
                         send_email_alert(emojis, out_path)
                         send_slack_alert(emojis)
                     else:
-                        print(f"   🔕 Quiet hours active. Alert suppressed: {emojis}")
+                        logging.info(f"   🔕 Quiet hours active. Alert suppressed: {emojis}")
                         
                     last_alert_time = time.time()
                 else:
@@ -226,7 +284,7 @@ def main():
             time.sleep(0.1)
 
     except KeyboardInterrupt:
-        print("\n🛑 Shutting down Rook Engine...")
+        logging.info("\n🛑 Shutting down Rook Engine...")
     finally:
         cam.stop()
         cam.close()

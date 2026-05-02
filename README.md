@@ -68,11 +68,12 @@ Camera (IMX462 STARVIS)
 | Part | Model | Notes |
 |------|-------|-------|
 | Compute | Raspberry Pi 5 (2 GB) | Quad-core Cortex-A76 @ 2.4 GHz, headless 64-bit |
-| Sensor | [Arducam B0444](https://www.arducam.com/product/arducam-2mp-imx462/) (IMX462 STARVIS) | 2MP, fixed IR-cut, M12 mount. **Pivariety** camera (onboard MCU). |
+| Sensor | [Arducam B0444](https://www.arducam.com/product/arducam-2mp-imx462/) (IMX462 STARVIS) | 2MP, fixed IR-cut, M12 mount. **Pivariety** MCU. *Note: Board is 24x25mm and lacks standard 29mm mounting holes.* |
 | Storage | SanDisk 32 GB High Endurance | Endurance-rated for 24/7 writes |
 | Thermal | Easycargo heatsink kit | Passive aluminum + copper. ~37°C idle, ~46°C under inference. |
 | Mount | Juxiamal 41mm PVC suction cups (M5) | 4× window-mount, screw-nut style |
-| Power | Besgoods 5V/3A USB-A charger | + Itramax 10ft flat USB-A→USB-C cable |
+| Assembly | M2.5 Standoffs / Screws | Required for Pi 5 mounting points (85mm × 56mm). Custom 3D clip needed for B0444. |
+| Power | Besgoods 5V/3A USB-A charger | + Itramax 10ft flat USB-A→USB-C cable. *Requires high quality/short cable to prevent brownouts.* |
 
 **Prototype cost:** ~$213 all-in. Full purchase history in [`device/bom.md`](device/bom.md).
 
