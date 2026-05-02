@@ -25,6 +25,7 @@ QUIET_HOURS_END = 6             # 6 AM
 MIN_EMAIL_SCORE = 15            # Score threshold for real-time email/MMS alerts
 MIN_SLACK_SCORE = 1             # Score threshold for lightweight Slack pings
 THERMAL_CHECK_INTERVAL = 30     # Seconds between SoC temp reads (not per-frame)
+DIGEST_HOUR = 3                 # 3 AM — mathematically least-active hour, minimizes missed captures
 LOG_FILE = os.path.expanduser("~/rook.log")
 BEAST_CAM_DIR = os.path.expanduser("~/beast_cam")  # Wildlife crop cache
 
@@ -468,7 +469,7 @@ def main():
                 daily_stats = fresh_stats()
                 best_daily_image = {"score": 0, "path": None, "summary": ""}
 
-            if now_hour == 18 and last_digest_date != today_date:
+            if now_hour == DIGEST_HOUR and last_digest_date != today_date:
                 # Run digest in background — SMTP + crop attachment can take 10-30s
                 threading.Thread(
                     target=send_daily_digest,
