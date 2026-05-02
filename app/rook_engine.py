@@ -199,10 +199,10 @@ def send_email_alert(emoji_summary, image_path):
             return
 
         msg = EmailMessage()
-        msg["Subject"] = f"Rook Alert: {emoji_summary}"
+        msg["Subject"] = emoji_summary
         msg["From"] = smtp_user
         msg["To"] = notify_email
-        msg.set_content(f"Rook detected activity:\n\n{emoji_summary}")
+        msg.set_content(emoji_summary)
 
         if os.path.exists(image_path):
             ctype, encoding = mimetypes.guess_type(image_path)
@@ -226,7 +226,7 @@ def send_slack_alert(emoji_summary):
         return
         
     try:
-        payload = {"text": f"Rook Activity: {emoji_summary}"}
+        payload = {"text": emoji_summary}
         httpx.post(webhook_url, json=payload, timeout=5.0)
         logging.info("💬 Slack alert sent!")
     except Exception as e:
