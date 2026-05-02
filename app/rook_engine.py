@@ -556,6 +556,7 @@ def main():
                 if now - last_alert_time > COOLDOWN_SECONDS:
                     if sorted(detected_classes) == sorted(last_detected_classes):
                         logging.info("   Redundant scene (no change). Skipping alert.")
+                        last_alert_time = now  # Reset cooldown to avoid burst on next cycle
                     else:
                         dispatch_alerts_async(img_score, emojis, out_path, detected_classes)
                         last_alert_time = now
