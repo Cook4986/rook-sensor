@@ -78,6 +78,30 @@ Camera (IMX462 STARVIS)
 
 ---
 
+## Software Stack
+
+| Layer | Technology | Notes |
+|-------|------------|-------|
+| OS | Raspberry Pi OS Lite 64-bit | Debian Trixie (or Bookworm). Headless, no desktop. |
+| Camera driver | Arducam Pivariety (`arducam-pivariety` overlay) | Patched libcamera — required for B0444 MCU. Native `imx462` overlay will not work. |
+| Python env | `~/rook-env` (venv with `--system-site-packages`) | System site-packages needed for `picamera2` / libcamera bindings. |
+| AI model | [Ultralytics YOLOv11n](https://docs.ultralytics.com/models/yolo11/) | 2.6M params, 6.5 GFLOPs. Pretrained on COCO (80 classes). `conf=0.45`. |
+| Inference | PyTorch 2.x (CPU-only, `aarch64`) | ~350ms/frame @ 640px on Cortex-A76. |
+| Vision | OpenCV (`opencv-python-headless`) | MOG2 background subtraction for motion gating. |
+| Messaging | Twilio SMS (A2P 10DLC registered) | Sole Proprietor campaign. Rate-limited: 60s min between routine sends. |
+| Remote access | [Tailscale](https://tailscale.com) | Zero-config VPN. Also serves as OTA update channel (`git pull` + `systemctl restart rook`). |
+
+### OS Hardening
+
+| Measure | Purpose |
+|---------|--------|
+| `tmpfs` on `/tmp` (64 MB) and `/var/log` (32 MB) | Minimize SD card write wear for 24/7 operation |
+| Hardware watchdog (`bcm2835_wdt`) | Auto-reboot on process or OS hang |
+| 2 GB swap file (`/swapfile`) | Prevent OOM freezes during inference |
+| SSH key auth (ed25519) | Secure remote access |
+
+---
+
 ## Quick Start
 
 > Full step-by-step with photos and troubleshooting in [`device/assembly.md`](device/assembly.md).
@@ -146,6 +170,16 @@ TWILIO_FROM_NUMBER=+1XXXXXXXXXX
 NOTIFY_TO_NUMBER=+1XXXXXXXXXX
 ```
 
+### 7. Remote Access (Tailscale)
+
+```bash
+curl -fsSL https://tailscale.com/install.sh | sh
+sudo tailscale up    # Opens an auth URL — approve in your browser
+tailscale ip -4      # Your device's Tailscale IP
+```
+
+Once connected, SSH from anywhere: `ssh rook@100.x.x.x`
+
 ---
 
 ## Emoji Vocabulary
@@ -165,6 +199,31 @@ NOTIFY_TO_NUMBER=+1XXXXXXXXXX
 | Emergency | `🚨` | Flashing lights — bypasses rate limits |
 
 **Quiet hours:** 11 PM – 6 AM default (routine alerts suppressed, `🚨` stays active).
+
+---
+
+## Site Context
+
+Rook is designed for a **2nd-floor window mount** overlooking a residential street, crosswalk, and park. Key site considerations:
+
+- **Mounting:** Lower portion of window pane, interior glass surface. Suction cups attach flush.
+- **Zone masking:** The right ~30% of the frame contains an ornamental tree — the MOG2 motion gate masks this region to suppress false positives from leaf/branch movement.
+- **Night vision:** The B0444's fixed IR-cut filter + f/1.6 equivalent aperture + Sony STARVIS sensor handles streetlit scenes well. For unlit areas, upgrade to the B0423 (motorized IR-cut).
+- **Power run:** ~2m flat USB-C cable from window sill to wall outlet.
+
+---
+
+## Thermal Monitoring
+
+A background thread reads `/sys/class/thermal/thermal_zone0/temp` every 60 seconds:
+
+| Threshold | Action |
+|-----------|--------|
+| < 60°C | 🟢 Normal — no action |
+| ≥ 75°C | 🟡 SMS warning: `⚠️ Rook thermal warning: 75°C` |
+| ≥ 85°C | 🔴 Graceful shutdown — pauses inference, sends `🌡️ Rook thermal shutdown: 85°C`, idles until < 70°C |
+
+Observed temps: **37°C idle**, **46°C under inference** (passive heatsink, indoor mount).
 
 ---
 
@@ -218,6 +277,15 @@ rook-sensor/
 - [ ] Next.js dashboard (Supabase + Vercel)
 - [ ] v2 housing (3D-printed enclosure, silicone suction cups)
 - [ ] AI HAT+ upgrade (Hailo-8L, 13 TOPS → sub-100ms inference)
+
+### Upgrade Path
+
+The Pi 5's PCIe slot supports the [Raspberry Pi AI HAT+](https://www.raspberrypi.com/products/ai-hat-plus/) (Hailo-8L, 13 TOPS, ~$26). This snap-on accelerator would enable:
+- Sub-10ms YOLOv11n inference (vs. ~350ms CPU)
+- Continuous real-time monitoring without the MOG2 motion gate
+- Heavier models (YOLOv8s, segmentation) or multi-camera pipelines
+
+No housing, power, or software architecture changes required.
 
 ---
 
