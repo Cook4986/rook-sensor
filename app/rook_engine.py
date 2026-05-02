@@ -20,7 +20,8 @@ MOTION_THRESHOLD_PIXELS = 3000  # How many pixels must change to trigger YOLO
 COOLDOWN_SECONDS = 60           # Minimum seconds between alerts
 QUIET_HOURS_START = 23          # 11 PM
 QUIET_HOURS_END = 6             # 6 AM
-MIN_ALERT_SCORE = 15            # Minimum score to trigger real-time Email/Slack
+MIN_EMAIL_SCORE = 15            # Score threshold for heavy Email/MMS alerts
+MIN_SLACK_SCORE = 1             # Score threshold for lightweight real-time Slack pings
 LOG_FILE = os.path.expanduser("~/rook.log")
 logging.basicConfig(
     level=logging.INFO,
@@ -118,6 +119,14 @@ def calculate_image_score(detected_classes):
     # Bonus for complex scenes (many different types of objects)
     score += len(counts) * 5
     return int(score)
+
+def get_temp():
+    """Reads the Raspberry Pi SoC temperature in Celsius."""
+    try:
+        with open('/sys/class/thermal/thermal_zone0/temp', 'r') as f:
+            return float(f.read()) / 1000.0
+    except:
+        return 0.0
 
 def configure_camera_exposure(cam):
     """Sets camera EV and limits based on day/night."""
@@ -252,6 +261,12 @@ def main():
     
     try:
         while True:
+            # Bulletproof Emergency Thermal Cutoff
+            if get_temp() > 80.0:
+                logging.error("🚨🔥 CRITICAL THERMAL LIMIT REACHED! Initiating Emergency Hardware Shutdown...")
+                os.system("sudo shutdown -h now")
+                break
+                
             # Capture frame
             frame = cam.capture_array()
             
@@ -326,15 +341,20 @@ def main():
                         best_daily_image = {"score": img_score, "path": best_path, "summary": emojis}
                         logging.info(f"   🏆 New Daily High Score: {img_score}!")
                     
-                    # Dispatch logic: Only alert in real-time if it's a high-ranked event
-                    if img_score >= MIN_ALERT_SCORE:
-                        if not is_quiet_hours():
+                    # Dispatch logic: Independent thresholds for Email and Slack
+                    if not is_quiet_hours():
+                        dispatched = False
+                        if img_score >= MIN_EMAIL_SCORE:
                             send_email_alert(emojis, out_path)
+                            dispatched = True
+                        if img_score >= MIN_SLACK_SCORE:
                             send_slack_alert(emojis)
-                        else:
-                            logging.info(f"   🔕 Quiet hours active. Alert suppressed: {emojis}")
+                            dispatched = True
+                            
+                        if not dispatched:
+                            logging.info(f"   📉 Routine event (Score: {img_score}). Confined to daily digest.")
                     else:
-                        logging.info(f"   📉 Routine event (Score: {img_score}). Confined to daily digest.")
+                        logging.info(f"   🔕 Quiet hours active. Alert suppressed: {emojis}")
                         
                     last_alert_time = time.time()
                 else:
