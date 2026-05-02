@@ -42,57 +42,50 @@ logging.basicConfig(
 # ── COCO Class → Emoji ────────────────────────────────────────────────────────
 EMOJI_MAP = {
     "person": "🚶", "backpack": "🎒", "umbrella": "☂️", "suitcase": "🧳", "cell phone": "📱",
-    "skateboard": "🛹", "sports ball": "⚽", "frisbee": "🥏", "kite": "🪁",
-    "bicycle": "🚲", "car": "🚗", "motorcycle": "🏍️",
-    "bus": "🚌", "truck": "🚚",
-    "dog": "🐕", "cat": "🐈", "bird": "🦅",
-    "bear": "🐻", "horse": "🐎", "sheep": "🐑", "cow": "🐄"
-}
-
-# ── Rarity Scores — calibrated to suburban yard context ──────────────────────
-# Score = how surprising is this sighting in an urban/suburban yard?
-# Slack fires at MIN_SLACK_SCORE. Email fires at MIN_EMAIL_SCORE.
+  # ── Rarity Scores — urban yard context ──────────────────────────────────
+# Philosophy: score = urban unusualness. Crowd/emergency/anomaly → high. Routine → low.
+# Barnyard classes (sheep/cow/horse) are COCO misclassifications in urban context — silenced.
 SCORE_MAP = {
-    # Routine yard/street activity (Slack-only, score 1–8)
-    "person":       2,   # Pedestrian — common
-    "bird":         3,   # Robin, sparrow, crow — frequent yard visitor
-    "dog":          4,   # Dog walker — common
-    "backpack":     3,   # Student/hiker
-    "umbrella":     3,   # Pedestrian in rain
-    "cell phone":   2,   # Someone on phone
-    "motorcycle":   4,   # Road traffic
-    "truck":        4,   # Delivery/utility
-    "bus":          4,   # Transit
-    # Notable (score 5–15)
-    "skateboard":   5,
-    "sports ball":  5,   # Kids playing
-    "frisbee":      6,
-    "kite":         8,
-    "suitcase":     8,   # Traveler / someone moving
-    "cat":         12,   # Less common yard visitor
-    # Unusual — email-worthy (score 20+)
-    "sheep":       30,   # Suburban → Deer heuristic
-    "cow":         30,   # Large wildlife
-    "horse":       30,   # Very unusual in urban yard
-    # Critical
-    "bear":       100,   # Immediate action
-    # Silent solo (suppressed before scoring — base score irrelevant)
-    "car":          1,
-    "bicycle":      1,
+    # ─ Routine (Slack-only) ──────────────────────────────────────────────
+    "person":      2,   # Pedestrian — routine
+    "dog":         4,   # Dog walker
+    "bird":        3,   # Common yard bird (silent solo)
+    "backpack":    3,
+    "umbrella":    3,
+    "cell phone":  2,
+    "motorcycle":  5,   # Road traffic; could be police motorcycle
+    # ─ Notable urban events (Slack + potential Email) ─────────────────────
+    "bus":         8,   # Transit event, large crowd vehicle
+    "truck":      12,   # Delivery, utility — OR fire truck/ambulance (same COCO class)
+    "suitcase":    8,   # Someone moving
+    "kite":        6,
+    "frisbee":     5,
+    "sports ball": 5,
+    "skateboard":  4,
+    "cat":         4,   # Less interesting in urban context
+    # ─ Silenced / barnyard noise (COCO urban misclassifications) ─────────
+    "sheep":       1,   # Urban: COCO misclassification — silenced
+    "cow":         1,
+    "horse":       1,
+    # ─ Critical ───────────────────────────────────────────────────
+    "bear":      100,
+    # ─ Silent solo (suppressed before scoring) ────────────────────────
+    "car":         1,
+    "bicycle":     1,
 }
-
 
 # ── Daily Stats Category Membership ──────────────────────────────────────────
 TRAFFIC_CLASSES     = {"car", "truck", "bus", "motorcycle", "bicycle"}
 PEDESTRIAN_CLASSES  = {"person"}
-ANIMAL_CLASSES      = {"bird", "dog", "cat", "bear", "horse", "sheep", "cow"}
-DELIVERY_CLASSES    = {"truck"}   # Subset of traffic; delivery heuristic
-WILDLIFE_CLASSES    = ANIMAL_CLASSES  # Alias used for Beast Cam crop caching
+ANIMAL_CLASSES      = {"bird", "dog", "cat", "bear"}
+DELIVERY_CLASSES    = {"truck"}
+WILDLIFE_CLASSES    = ANIMAL_CLASSES
 
-# Classes that are too routine for real-time alerts when appearing SOLO.
-# A scene containing ONLY these classes is counted in stats but never Slacked/emailed.
-# Mixed scenes (e.g. car + person) are NOT suppressed.
-SILENT_SOLO_CLASSES = {"car", "bicycle", "bird"}
+# Classes silenced when appearing solo (too routine or urban COCO misclassification)
+SILENT_SOLO_CLASSES = {"car", "bicycle", "bird", "sheep", "cow", "horse"}
+DELIVERY_CLASSES    = {"truck"}
+WILDLIFE_CLASSES    = ANIMAL_CLASSES
+
 
 
 # ── Translation Heuristics ────────────────────────────────────────────────────
@@ -148,14 +141,35 @@ def is_quiet_hours():
 
 
 # ── Scoring ───────────────────────────────────────────────────────────────────
-def calculate_image_score(detected_classes):
+def calculate_image_score(detected_classes, weather_bonus: int = 0):
     score = 0
     counts = {c: detected_classes.count(c) for c in set(detected_classes)}
+
     for obj, count in counts.items():
         base = SCORE_MAP.get(obj, 1)
         score += base * (count ** 1.5)
+
+    # Diversity bonus
     score += len(counts) * 5
+
+    # Urban event bonuses
+    person_count = counts.get("person", 0)
+    if person_count >= 5:
+        score += 30   # Large crowd: rally, incident, street closure
+    elif person_count >= 3:
+        score += 10   # Small gathering
+
+    heavy = counts.get("truck", 0) + counts.get("bus", 0)
+    if heavy >= 2:
+        score += 20   # Multiple heavy vehicles: fire response, utility, crash
+
+    if counts.get("dog", 0) > 0 and counts.get("person", 0) == 0:
+        score += 15   # Loose dog anomaly
+
+    score += weather_bonus  # From enrichment: extreme weather WMO bonus
+
     return int(score)
+
 
 
 # ── Thermal ───────────────────────────────────────────────────────────────────
