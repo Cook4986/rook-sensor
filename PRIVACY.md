@@ -59,7 +59,7 @@ Rook processes camera frames in real-time on the device itself (edge inference).
 | **Supabase** (optional) | Event logging dashboard | Anonymized detection metadata |
 | **Cloudflare R2** (optional) | Emergency frame storage | Single frames with 24h auto-expiry |
 
-No data is sold, shared with advertisers, or used for any purpose beyond device operation.
+**No mobile information will be shared with third parties/affiliates for marketing/promotional purposes.** All other categories exclude text messaging originator opt-in data and consent; this information will not be shared with any third parties. No data is sold, shared with advertisers, or used for any purpose beyond device operation.
 
 ## GDPR / CCPA Compliance
 

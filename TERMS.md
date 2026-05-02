@@ -38,7 +38,7 @@ You can stop receiving messages at any time by:
 Reply **HELP** for support information.
 
 ### Message & Data Rates
-Standard message and data rates from your mobile carrier may apply.
+Standard message and data rates from your mobile carrier may apply. Carriers are not liable for delayed or undelivered messages.
 
 ### Support
 For support, open an issue at [github.com/Cook4986/rook-sensor](https://github.com/Cook4986/rook-sensor) or contact the device owner directly.
