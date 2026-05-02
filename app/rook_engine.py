@@ -64,6 +64,11 @@ ANIMAL_CLASSES      = {"bird", "dog", "cat", "bear", "horse", "sheep", "cow"}
 DELIVERY_CLASSES    = {"truck"}   # Subset of traffic; delivery heuristic
 WILDLIFE_CLASSES    = ANIMAL_CLASSES  # Alias used for Beast Cam crop caching
 
+# Classes that are too routine for real-time alerts when appearing SOLO.
+# A scene containing ONLY these classes is counted in stats but never Slacked/emailed.
+# Mixed scenes (e.g. car + person) are NOT suppressed.
+SILENT_SOLO_CLASSES = {"car", "bicycle"}
+
 
 # ── Translation Heuristics ────────────────────────────────────────────────────
 def translate_to_emoji_summary(detected_classes):
@@ -280,6 +285,13 @@ def send_daily_digest(notify_email, best_image_data, daily_stats, beast_cam_toda
 
         logging.info(f"📧 Daily digest sent to {notify_email} ({len(beast_crops)} beast cam crops)")
 
+        # Clear Beast Cam cache immediately after successful delivery
+        # User has the images in their inbox — no need to keep them on device.
+        if os.path.isdir(beast_cam_today_dir):
+            import shutil
+            shutil.rmtree(beast_cam_today_dir, ignore_errors=True)
+            logging.info(f"🗑️  Beast Cam cache cleared: {beast_cam_today_dir}")
+
         # Reset log
         with open(LOG_FILE, "w") as f:
             f.write(f"--- Rook Log Reset ({datetime.now().strftime('%Y-%m-%d %H:%M:%S')}) ---\n")
@@ -333,8 +345,17 @@ def send_slack_alert(emoji_summary):
         logging.error(f"❌ Failed to send Slack alert: {e}")
 
 
-def dispatch_alerts_async(img_score, emojis, out_path):
-    """Fire email and Slack in parallel background threads — main loop never blocks."""
+def dispatch_alerts_async(img_score, emojis, out_path, detected_classes):
+    """Fire email and Slack in parallel background threads — main loop never blocks.
+
+    Silent solo suppression: if every detected class is in SILENT_SOLO_CLASSES
+    (e.g. car-only scene), skip real-time alerts entirely. Stats are unaffected.
+    """
+    unique = set(detected_classes)
+    if unique and unique.issubset(SILENT_SOLO_CLASSES):
+        logging.info(f"   🚗 Silent solo class(es) {unique}. Counted in stats, no alert.")
+        return
+
     if is_quiet_hours():
         logging.info(f"   🔕 Quiet hours active. Alert suppressed: {emojis}")
         return
@@ -350,6 +371,22 @@ def dispatch_alerts_async(img_score, emojis, out_path):
             t.start()
     else:
         logging.info(f"   📉 Routine event (Score: {img_score}). Confined to daily digest.")
+
+
+# ── Beast Cam Purge ───────────────────────────────────────────────────────────
+def _purge_old_beast_cam(days: int = 7):
+    """Delete Beast Cam date-directories older than `days` to prevent SD card fill-up."""
+    import shutil
+    cutoff = time.time() - days * 86400
+    try:
+        if not os.path.isdir(BEAST_CAM_DIR):
+            return
+        for entry in os.scandir(BEAST_CAM_DIR):
+            if entry.is_dir() and entry.stat().st_mtime < cutoff:
+                shutil.rmtree(entry.path, ignore_errors=True)
+                logging.info(f"🗑️  Purged old Beast Cam dir: {entry.name}")
+    except Exception as e:
+        logging.warning(f"Beast Cam purge failed: {e}")
 
 
 # ── Main Loop ─────────────────────────────────────────────────────────────────
@@ -432,14 +469,16 @@ def main():
                 best_daily_image = {"score": 0, "path": None, "summary": ""}
 
             if now_hour == 18 and last_digest_date != today_date:
-                yesterday_dir = os.path.join(BEAST_CAM_DIR, today_date)
-                send_daily_digest(
-                    os.environ.get("NOTIFY_EMAIL"),
-                    best_daily_image,
-                    daily_stats,
-                    yesterday_dir,
-                )
+                # Run digest in background — SMTP + crop attachment can take 10-30s
+                threading.Thread(
+                    target=send_daily_digest,
+                    args=(os.environ.get("NOTIFY_EMAIL"), best_daily_image,
+                          daily_stats, os.path.join(BEAST_CAM_DIR, today_date)),
+                    daemon=True,
+                ).start()
                 last_digest_date = today_date
+                # Purge Beast Cam dirs older than 7 days to protect SD card
+                _purge_old_beast_cam(days=7)
 
             # Re-evaluate exposure every 10 minutes
             if now_mono - last_daytime_check > 600:
@@ -517,7 +556,7 @@ def main():
                     if sorted(detected_classes) == sorted(last_detected_classes):
                         logging.info("   Redundant scene (no change). Skipping alert.")
                     else:
-                        dispatch_alerts_async(img_score, emojis, out_path)
+                        dispatch_alerts_async(img_score, emojis, out_path, detected_classes)
                         last_alert_time = now
 
                 last_detected_classes = detected_classes
