@@ -16,7 +16,7 @@
 
 ## What It Does
 
-Rook is a window-mounted camera system that watches a street, sidewalk, or park and texts you emoji summaries of what's happening — `📦🚚` for a delivery, `🦌` for wildlife, `🚨` for an emergency.
+Rook is a window-mounted camera system that watches your yard and texts you emoji summaries of what's happening — `📦🚚` for a delivery, `🦌` for wildlife, `🚨` for an emergency.
 
 It runs 24/7 on a Raspberry Pi 5 with a Sony STARVIS sensor and [YOLOv11n](https://docs.ultralytics.com/models/yolo11/), processing everything on-device at the edge.
 
