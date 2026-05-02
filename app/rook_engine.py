@@ -34,9 +34,11 @@ logging.basicConfig(
 
 # Base YOLO COCO to Emoji map
 EMOJI_MAP = {
-    "person": "🚶", "backpack": "🎒", "umbrella": "☂️",
+    "person": "🚶", "backpack": "🎒", "umbrella": "☂️", "suitcase": "🧳", "cell phone": "📱",
+    "skateboard": "🛹", "sports ball": "⚽", "frisbee": "🥏", "kite": "🪁",
     "bicycle": "🚲", "car": "🚗", "motorcycle": "🏍️",
     "bus": "🚌", "truck": "🚚",
+    "dog": "🐕", "cat": "🐈", "bird": "🦅",
     "bear": "🐻", "horse": "🐎", "sheep": "🐑", "cow": "🐄"
 }
 
@@ -44,6 +46,8 @@ EMOJI_MAP = {
 SCORE_MAP = {
     "person": 1, "car": 1, "dog": 2, "bicycle": 2,
     "truck": 5, "bus": 5, "motorcycle": 3,
+    "skateboard": 3, "sports ball": 3, "frisbee": 3, "kite": 5,
+    "suitcase": 5, "cell phone": 5, "backpack": 2, "umbrella": 2,
     "cat": 10, "bird": 15,
     "bear": 100, "horse": 50, "sheep": 50, "cow": 50
 }

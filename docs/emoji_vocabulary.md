@@ -2,48 +2,48 @@
 
 Rook translates real-world activity into a compact, low-bandwidth emoji vocabulary. This ensures privacy (no video transmission) and rapid visual parsing.
 
-## 1. Routine Logistics
-These are everyday occurrences that are useful for ambient awareness.
+*Note: In v1.1, the engine was refactored to prioritize pure, single-symbol emojis. Composite emojis (e.g. Dog + Walker) are broken apart into their base components (`🐕 x1 🚶 x1`) for at-a-glance legibility. Secondary symbols are only used for critical anomaly clarification.*
 
-| Emoji | Event | Translation |
+## 1. Core Logistics & Vehicles
+| Emoji | YOLO Class | Translation / Context |
 | :---: | :--- | :--- |
-| `📦🚚` | Delivery | "A delivery truck has arrived/departed." |
-| `📬🚐` | Mail Carrier | "The postal service is at the mailbox." |
-| `🗑️🚛` | Sanitation | "Trash or recycling collection is occurring." |
-| `🚌🛑` | School Bus | "A school bus has stopped nearby." |
+| `🚗` | `car` | Standard passenger vehicle |
+| `🚚` | `truck` | Delivery, utility, or sanitation truck |
+| `🚌` | `bus` | School bus or public transit |
+| `🏍️` | `motorcycle` | Motorcycle or moped |
+| `🚲` | `bicycle` | Bicycle passing by |
 
-## 2. Neighborhood & Pedestrian Patterns
-Captures the general "vibe" and flow of people without identifying individuals.
-
-| Emoji | Event | Translation |
+## 2. Pedestrian Patterns
+| Emoji | YOLO Class | Translation / Context |
 | :---: | :--- | :--- |
-| `👨‍👩‍👧‍👦` | Small Group | "A small group of people (family, friends) is passing by." |
-| `🏟️` | Crowd | "A large group of people has gathered or is moving through." |
-| `🏃‍♀️⏱️` | Jogger | "Someone is running or exercising." |
-| `🐕🦺` | Dog Walker | "Someone is walking their dog." |
-| `🚶‍♂️🌇` | Commuter Flow | "A steady stream of pedestrians (typical evening/morning commute)." |
-| `🧒⚽` | Park Activity | "Children or individuals are playing in the park/yard." |
-| `🧹🍁` | Grounds Crew | "Landscaping, leaf blowing, or maintenance is taking place." |
-| `🌳` | Scene Clear | "The monitored area has returned to baseline (empty)." |
+| `🚶` | `person` | Single pedestrian |
+| `👥` | `person` (>1) | Small group or couple passing by |
+| `🏟️` | `person` (>3) | Large crowd or heavy foot traffic |
+| `🎒` | `backpack` | Student or hiker |
+| `🧳` | `suitcase` | Traveler / someone moving |
+| `☂️` | `umbrella` | Pedestrian in rain |
+| `📱` | `cell phone`| Pedestrian lingering on their phone |
 
-## 3. Anomalies & Wildlife
-Events that break the typical pattern or require mild attention.
-
-| Emoji | Event | Translation |
+## 3. Park & Recreation (COCO Ecosystem Additions)
+| Emoji | YOLO Class | Translation / Context |
 | :---: | :--- | :--- |
-| `🦌` | Large Wildlife | "A deer or similar large animal is in the area." |
-| `🦊` | Medium Wildlife | "A fox, coyote, or similar animal is roaming." |
-| `🦝🗑️` | Scavengers | "A raccoon or opossum (often near trash bins)." |
-| `🐻` | Bear | "A bear detected in the perimeter." |
-| `🦅` / `🦉` | Large Birds | "A hawk, owl, or large bird of prey detected." |
-| `🐿️` | Small Wildlife | "Squirrels, rabbits, or small rodents." |
-| `🐕⚠️` | Loose Dog | "A dog is present without a visible owner/leash." |
-| `🚲💨` | Sidewalk Cyclist | "A bicycle/scooter is moving quickly on the pedestrian path." |
-| `🚗🅿️` | Unfamiliar Parking | "A vehicle has parked in an unusual or restricted spot." |
-| `🔦👀` | Nighttime Activity | "Unusual pedestrian movement during quiet hours (e.g., examining cars)." |
+| `🛹` | `skateboard` | Skateboarder on sidewalk |
+| `⚽` | `sports ball`| Kids playing in the street/yard |
+| `🥏` | `frisbee` | Yard recreation |
+| `🪁` | `kite` | Park recreation |
 
-## 4. Emergency & System Alerts
-High-priority alerts that bypass rate limits and quiet hours.
+## 4. Wildlife & Anomalies
+*Note: High-scoring anomalies automatically bypass standard email rate limits.*
+
+| Emoji | YOLO Class | Translation / Context |
+| :---: | :--- | :--- |
+| `🐕` | `dog` | Dog (accompanied by person) |
+| `🐕⚠️` | `dog` (no person)| **Anomaly:** Loose, off-leash dog |
+| `🐈` | `cat` | Feline roaming |
+| `🦅` | `bird` | Large bird (hawk, owl, crow) |
+| `🦌` | `sheep`/`cow` | **Heuristic Map:** Suburban large wildlife (Deer) |
+| `🐻` | `bear` | **Critical Anomaly:** Bear in perimeter |
+| `🐎` | `horse` | Equestrian activity |
 
 | Emoji | Event | Translation |
 | :---: | :--- | :--- |
