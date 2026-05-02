@@ -28,7 +28,7 @@
 
 1. Download [Raspberry Pi Imager](https://www.raspberrypi.com/software/).
 2. Insert the SanDisk microSD into the Acer reader → plug into Mac.
-3. Choose OS → **Raspberry Pi OS Lite (64-bit, Bookworm)**.
+3. Choose OS → **Raspberry Pi OS Lite (64-bit)** (Trixie or Bookworm both work).
 4. Advanced settings (⚙️):
    - Hostname: `rook.local`
    - SSH: ✅ password auth
@@ -52,11 +52,15 @@
 
 ### Camera Cable
 
-> **Use the 22-pin → 22-pin cable** (Pi 5 native). The 15-pin cable is for Pi 4 only.
+> **Important:** The B0444 is a **Pivariety** camera (has an onboard MCU). It requires the `arducam-pivariety` overlay and Arducam's patched libcamera — the native `imx462` overlay will NOT work.
 
-1. Lift the black latch on the Pi 5's **CAM/DISP 0** connector (closest to Ethernet).
-2. Insert the 22-pin cable, **contacts facing down** (toward PCB). Close latch.
-3. On the Arducam board: lift latch, insert other end (contacts toward PCB), close latch.
+> **Cable:** Either included cable works (22-pin or the narrower 15-to-22-pin adapter). Remove the small plastic protective cover from the Pi 5's CSI connector first.
+
+1. Lift the black latch on the Pi 5's **CAM/DISP 1** connector (farther from Ethernet, closer to HDMI).
+2. Insert the cable with **metal contacts facing the Ethernet port** (upward/away from PCB). Close latch.
+3. On the Arducam board: lift latch, insert other end (contacts toward sensor PCB), close latch.
+
+> Refer to [Arducam Quick Start — Connector Types](https://docs.arducam.com/Raspberry-Pi-Camera/Native-camera/Quick-Start-Guide/#connector-types) for diagrams.
 
 ### Power
 
@@ -64,7 +68,7 @@ Route the flat USB-A→USB-C cable from the charger to the Pi 5's USB-C port. **
 
 ### ✅ Checkpoint
 
-Pi 5 with heatsink attached, CSI cable on CAM/DISP 0, SD card inserted, power staged but unplugged.
+Pi 5 with heatsink attached, CSI cable on CAM/DISP 1, SD card inserted, power staged but unplugged.
 
 ---
 
@@ -103,30 +107,51 @@ sudo systemctl enable watchdog && sudo systemctl start watchdog
 
 ~15 minutes.
 
+### Step 1: Enable the Pivariety overlay
+
 ```bash
-# Install Arducam Pivariety driver
-wget -qO install_pivariety_pkgs.sh \
-  https://github.com/ArduCAM/Arducam-Pivariety-V4L2-Driver/releases/download/install_script/install_pivariety_pkgs.sh
-chmod +x install_pivariety_pkgs.sh
-./install_pivariety_pkgs.sh -p kernel_driver
+sudo nano /boot/firmware/config.txt
+
+# Change camera_auto_detect=1 to:
+camera_auto_detect=0
+
+# Under [all], add:
+dtoverlay=arducam-pivariety,cam1
+
+# Save and reboot
 sudo reboot
 ```
 
-After reboot:
+### Step 2: Install Arducam patched libcamera
+
+The B0444 Pivariety MCU requires Arducam's custom libcamera build:
 
 ```bash
-# Verify sensor detection
-v4l2-ctl --list-devices   # Should list arducam / imx462
+# Download installer
+wget -qO install_pivariety_pkgs.sh \
+  https://github.com/ArduCAM/Arducam-Pivariety-V4L2-Driver/releases/download/install_script/install_pivariety_pkgs.sh
+chmod +x install_pivariety_pkgs.sh
+
+# Install patched libcamera (answer 'A' to overwrite, 'Y' to deps)
+./install_pivariety_pkgs.sh -p libcamera_dev
+./install_pivariety_pkgs.sh -p libcamera_apps
+```
+
+### Step 3: Validate
+
+```bash
+# List cameras — should show arducam-pivariety [1920x1080 10-bit RGGB]
+rpicam-still --list-cameras
 
 # Capture test image
-rpicam-still -o test.jpg --width 1920 --height 1080 -t 2000
+rpicam-still -o test.jpg --width 1920 --height 1080 -t 3000 --nopreview
 
 # Pull to Mac for review
 scp rook@rook.local:~/test.jpg ~/Desktop/rook_first_light.jpg
 ```
 
-**Go:** `test.jpg` shows a recognizable image.
-**No-go:** Re-seat CSI cable (most common fix), verify connector orientation.
+**Go:** `test.jpg` shows a recognizable image at 1920×1080.
+**No-go:** Re-seat CSI cable, verify contacts face Ethernet port, check `dmesg | grep arducam`.
 
 ---
 
@@ -136,13 +161,21 @@ scp rook@rook.local:~/test.jpg ~/Desktop/rook_first_light.jpg
 
 ```bash
 # System deps
-sudo apt install -y python3-pip python3-venv libatlas-base-dev libopenjp2-7 libtiff6
+sudo apt install -y python3-pip python3-venv python3-picamera2 libatlas-base-dev libopenjp2-7 libtiff6
 
-# Virtual environment
-python3 -m venv ~/rook-env
+# Virtual environment (--system-site-packages needed for libcamera/picamera2 access)
+python3 -m venv --system-site-packages ~/rook-env
 source ~/rook-env/bin/activate
 pip install --upgrade pip
-pip install ultralytics opencv-python-headless picamera2 twilio httpx python-dotenv
+
+# CPU-only PyTorch (saves ~2 GB vs CUDA build)
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+
+# App dependencies
+pip install ultralytics opencv-python-headless twilio httpx python-dotenv
+
+# Fix numpy if system version conflicts
+pip install --force-reinstall numpy
 
 # Tailscale (remote access)
 curl -fsSL https://tailscale.com/install.sh | sh

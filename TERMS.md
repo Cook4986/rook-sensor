@@ -58,7 +58,7 @@ Rook is designed with privacy as a core principle. No video is recorded or trans
 
 ## 6. Open Source
 
-The Rook software is a private project. The source code is available at [github.com/Cook4986/rook-sensor](https://github.com/Cook4986/rook-sensor) for review. All rights reserved unless otherwise specified.
+Rook is open-source software released under the [MIT License](LICENSE). The source code, hardware documentation, and design rationale are publicly available at [github.com/Cook4986/rook-sensor](https://github.com/Cook4986/rook-sensor). Contributions and forks are welcome.
 
 ## 7. Modifications
 

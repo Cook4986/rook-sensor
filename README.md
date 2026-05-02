@@ -4,8 +4,12 @@
 
 <p align="center"><strong>Privacy-First, Visual-to-Emoji Ambient Monitor</strong></p>
 <p align="center">
-  Edge AI on a Raspberry Pi 5 — translates street activity into emoji SMS dashboards.<br>
-  No video saved. No cloud inference. Just signal.
+  Open-source edge AI on a Raspberry Pi 5 — translates street activity into emoji SMS dashboards.<br>
+  No video saved. No cloud inference. No surveillance. Just signal.
+</p>
+
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT License"></a>
 </p>
 
 ---
@@ -32,7 +36,7 @@ Rook is a window-mounted camera system that watches a street, sidewalk, or park 
 │  └─ No motion → sleep. Zero YOLO cost.          │
 │                                                 │
 │  Stage 2 — YOLO Inference (on-demand)           │
-│  ├─ 640×480 → YOLOv11n (~80ms/frame)            │
+│  ├─ 640×480 → YOLOv11n (~350ms/frame CPU)        │
 │  ├─ State machine → emoji translation           │
 │  └─ Twilio SMS (rate-limited, 60s min)           │
 │                                                 │
@@ -60,6 +64,9 @@ rook-sensor/
 │   └── bom.md              # Bill of materials + purchase records
 ├── assets/
 │   └── rook_logo.png
+├── PRIVACY.md              # Privacy policy
+├── TERMS.md                # Terms and conditions
+├── LICENSE                 # MIT License
 ├── .gitignore
 └── README.md
 ```
@@ -93,7 +100,9 @@ Use [Raspberry Pi Imager](https://www.raspberrypi.com/software/) → **Pi OS Lit
 
 ### 2. Assemble Hardware
 
-Attach heatsink → connect 22-pin CSI cable to CAM/DISP 0 → insert SD card → stage power cable. See [`device/assembly.md`](device/assembly.md) for the full step-by-step.
+Attach heatsink → connect CSI cable to **CAM/DISP 1** (farther from Ethernet) → insert SD card → stage power cable. See [`device/assembly.md`](device/assembly.md) for the full step-by-step.
+
+> ⚠️ **Use CAM/DISP 1 only.** CAM/DISP 0 produces I2C errors with the B0444 Pivariety camera.
 
 ### 3. Deploy & Setup
 
@@ -124,7 +133,9 @@ rpicam-still -o test.jpg --width 1920 --height 1080 -t 2000
 python3 ~/frame_test.py --benchmark --sms
 ```
 
-**Target:** YOLOv11n inference < 100ms avg @ 640px. SMS arrives on your phone.
+**Target:** YOLOv11n inference ~350ms avg @ 640px (CPU-only, PyTorch). SMS arrives on your phone.
+
+> The MOG2 fast loop polls every 2–3s and YOLO only runs on motion events, so ~350ms inference is more than adequate for real-time alerting. Sub-100ms is achievable with the AI HAT+ (Hailo-8L) upgrade.
 
 ## Emoji Vocabulary
 
@@ -150,8 +161,9 @@ python3 ~/frame_test.py --benchmark --sms
 
 - [x] Hardware procurement + assembly
 - [x] Pi 5 OS hardening + driver validation
-- [x] YOLOv11n benchmark (< 100ms target)
-- [x] SMS viewfinder (FRAME test)
+- [x] YOLOv11n benchmark (~350ms CPU-only)
+- [x] Tailscale remote access
+- [x] Twilio A2P 10DLC registration
 - [ ] MOG2 fast motion loop + zone masking
 - [ ] Detection → emoji state machine + rate limiter
 - [ ] Quiet hours + SMS command interface
@@ -161,6 +173,13 @@ python3 ~/frame_test.py --benchmark --sms
 - [ ] v2 housing (3D-printed, silicone suction cups)
 - [ ] AI HAT+ upgrade path (Hailo-8L, 13 TOPS)
 
+## Transparency
+
+Rook is built in the open. The entire hardware build, software stack, and design rationale are documented in this repo. Privacy is a core architectural constraint, not a feature toggle — no raw video is ever saved or transmitted by design.
+
+- [Privacy Policy](PRIVACY.md)
+- [Terms and Conditions](TERMS.md)
+
 ## License
 
-Private project. All rights reserved.
+[MIT](LICENSE) — use it, fork it, build your own.
