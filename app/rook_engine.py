@@ -19,20 +19,52 @@ COOLDOWN_SECONDS = 60           # Minimum seconds between alerts
 QUIET_HOURS_START = 23          # 11 PM
 QUIET_HOURS_END = 6             # 6 AM
 
-# Core Vocabulary Translation
+# Base YOLO COCO to Emoji map
 EMOJI_MAP = {
-    "person": "🚶‍♂️",
-    "bicycle": "🚲💨",
-    "car": "🚗",
-    "motorcycle": "🏍️",
-    "bus": "🚌🛑",
-    "truck": "🚚",
-    "dog": "🐕🦺",
-    "cat": "🐈",
-    "bird": "🦅",
-    "bear": "🐻",
-    "deer": "🦌"
+    "person": "🚶‍♂️", "backpack": "🎒", "umbrella": "☂️",
+    "bicycle": "🚲💨", "car": "🚗", "motorcycle": "🏍️",
+    "bus": "🚌🛑", "truck": "🚚",
+    "dog": "🐕", "cat": "🐈", "bird": "🦅",
+    "bear": "🐻", "horse": "🐎", "sheep": "🐑", "cow": "🐄"
 }
+
+def translate_to_emoji_summary(detected_classes):
+    """
+    Applies heuristics to raw YOLO classes to match the rich Rook Emoji Vocabulary.
+    Examples:
+      - person + dog = Dog Walker 🐕🦺
+      - >3 persons = Crowd 🏟️
+      - truck = Delivery/Sanitation 📦🚚
+    """
+    summary = []
+    counts = {c: detected_classes.count(c) for c in set(detected_classes)}
+    
+    # 1. Neighborhood Patterns
+    if counts.get("person", 0) > 3:
+        summary.append("🏟️ (Crowd)")
+    elif counts.get("person", 0) > 1:
+        summary.append("👨‍👩‍👧‍👦 (Group)")
+        
+    if "person" in counts and "dog" in counts:
+        summary.append("🐕🦺 (Dog Walker)")
+        counts["person"] = 0 # Consume the person
+        counts["dog"] = 0    # Consume the dog
+        
+    # 2. Routine Logistics
+    if "truck" in counts:
+        summary.append("📦🚚 (Delivery/Service Truck)")
+        counts["truck"] = 0
+    if "bus" in counts:
+        summary.append("🚌🛑 (Bus)")
+        counts["bus"] = 0
+        
+    # 3. Leftovers
+    for obj, count in counts.items():
+        if count > 0:
+            emoji = EMOJI_MAP.get(obj, f"[{obj}]")
+            summary.append(f"{emoji} x{count}")
+            
+    return " ".join(summary)
 
 def is_daytime():
     """Mathematical sun position for dynamic exposure limits."""
@@ -123,6 +155,11 @@ def main():
         while True:
             # Capture frame
             frame = cam.capture_array()
+            
+            # Drop alpha channel if Picamera2 returns XBGR8888 (4 channels)
+            if frame.shape[2] == 4:
+                frame = frame[:, :, :3]
+                
             if flip_180:
                 frame = cv2.rotate(frame, cv2.ROTATE_180)
             
@@ -143,15 +180,15 @@ def main():
                     # Run YOLO on the full-res frame
                     results = model(frame, imgsz=640, conf=0.45, verbose=False)
                     
-                    # Extract unique classes detected
-                    detected_classes = list(set([r.names[int(c)] for r in results[0].boxes.cls]))
+                    # Extract all classes detected (with duplicates for counting)
+                    detected_classes = [r.names[int(c)] for r in results[0].boxes.cls]
                     
                     if not detected_classes:
                         print("   Ghost motion (no objects found). Ignored.")
                         continue
                         
-                    # Translate to emojis
-                    emojis = " ".join([EMOJI_MAP.get(c, f"[{c}]") for c in detected_classes])
+                    # Translate to rich emoji summary
+                    emojis = translate_to_emoji_summary(detected_classes)
                     print(f"   Identified: {emojis}")
                     
                     # Save annotated image
