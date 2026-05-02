@@ -24,6 +24,9 @@ from dotenv import load_dotenv
 from picamera2 import Picamera2
 from ultralytics import YOLO
 import cv2
+import smtplib
+from email.message import EmailMessage
+import mimetypes
 
 
 def capture_frame():
@@ -80,6 +83,45 @@ def send_sms(detections_text):
     print(f"✅ SMS sent: {msg.sid}")
 
 
+def send_email(detections_text, image_path):
+    """Send an email via SMTP with detection results and attached image."""
+    try:
+        smtp_server = os.environ.get("SMTP_SERVER")
+        smtp_port = int(os.environ.get("SMTP_PORT", 587))
+        smtp_user = os.environ.get("SMTP_USER")
+        smtp_pass = os.environ.get("SMTP_PASS")
+        notify_email = os.environ.get("NOTIFY_EMAIL")
+
+        if not all([smtp_server, smtp_user, smtp_pass, notify_email]):
+            print("⚠️  Skipping Email — Missing SMTP credentials in ~/rook-env/.env")
+            return
+
+        msg = EmailMessage()
+        msg["Subject"] = "📷 Rook FRAME Test Results"
+        msg["From"] = smtp_user
+        msg["To"] = notify_email
+        msg.set_content(f"Rook FRAME test complete.\n\nYOLO detected: {detections_text}\n\nSee attached photo for camera placement and focus verification.")
+
+        # Attach image
+        if os.path.exists(image_path):
+            ctype, encoding = mimetypes.guess_type(image_path)
+            if ctype is None or encoding is not None:
+                ctype = "application/octet-stream"
+            maintype, subtype = ctype.split("/", 1)
+            
+            with open(image_path, "rb") as f:
+                msg.add_attachment(f.read(), maintype=maintype, subtype=subtype, filename=os.path.basename(image_path))
+
+        with smtplib.SMTP(smtp_server, smtp_port) as server:
+            server.starttls()
+            server.login(smtp_user, smtp_pass)
+            server.send_message(msg)
+            
+        print(f"✅ Email sent to {notify_email} with attached photo.")
+    except Exception as e:
+        print(f"❌ Failed to send email: {e}")
+
+
 def get_thermal():
     """Read the Pi's CPU temperature."""
     try:
@@ -94,6 +136,7 @@ def main():
     parser = argparse.ArgumentParser(description="Rook FRAME test & benchmark")
     parser.add_argument("--benchmark", action="store_true", help="Run 10-iteration inference benchmark")
     parser.add_argument("--sms", action="store_true", help="Send SMS with detection results")
+    parser.add_argument("--email", action="store_true", help="Send email with detection results and photo attachment")
     args = parser.parse_args()
 
     # Load environment
@@ -137,6 +180,10 @@ def main():
             print("⚠️  Skipping SMS — TWILIO_ACCOUNT_SID not set. Edit ~/rook-env/.env")
         else:
             send_sms(detections_text)
+
+    # Optional Email
+    if args.email:
+        send_email(detections_text, out_path)
 
 
 if __name__ == "__main__":
