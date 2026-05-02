@@ -124,22 +124,13 @@ def get_temp():
         return 0.0
 
 def configure_camera_exposure(cam):
-    """Sets camera EV, limits, and Auto White Balance (AWB) for color accuracy."""
-    base_controls = {
-        "AwbEnable": True,
-        "AwbMode": 0,          # auto
-        "Contrast": 1.1,       # Slight bump for YOLO feature extraction
-        "Saturation": 1.1      # Help color fidelity on the IMX462
-    }
-    
+    """Sets camera EV and limits based on day/night."""
     if is_daytime():
-        base_controls.update({"ExposureValue": 0.0, "FrameDurationLimits": (33333, 33333)})
-        cam.set_controls(base_controls)
-        logging.info("☀️  Camera locked to Daytime Exposure + AWB")
+        cam.set_controls({"ExposureValue": 0.0, "FrameDurationLimits": (33333, 33333)})
+        logging.info("☀️  Camera locked to Daytime Exposure")
     else:
-        base_controls.update({"ExposureValue": 1.0, "FrameDurationLimits": (33333, 100000)})
-        cam.set_controls(base_controls)
-        logging.info("🌙 Camera locked to Nighttime Exposure + AWB")
+        cam.set_controls({"ExposureValue": 1.0, "FrameDurationLimits": (33333, 100000)})
+        logging.info("🌙 Camera locked to Nighttime Exposure")
 
 def send_daily_digest(notify_email, best_image_data):
     """Compiles the daily log file and emails it at 6 PM, including the most interesting photo."""
@@ -320,12 +311,11 @@ def main():
                         logging.info("   Ghost motion (no objects found). Ignored.")
                         continue
                         
-                    # State check: prevent redundant alerts for parked cars/lingering objects
-                    if sorted(detected_classes) == sorted(last_detected_classes):
-                        logging.info("   Redundant objects (no change in scene). Ignored.")
-                        # Reset cooldown so we don't alert the moment the cooldown expires if they are still there
-                        last_alert_time = time.time()
-                        continue
+                    # TEMPORARILY DISABLED FOR TESTING: State check to prevent redundant alerts
+                    # if sorted(detected_classes) == sorted(last_detected_classes):
+                    #     logging.info("   Redundant objects (no change in scene). Ignored.")
+                    #     last_alert_time = time.time()
+                    #     continue
                         
                     last_detected_classes = detected_classes
                     
@@ -366,7 +356,9 @@ def main():
                     # Motion detected, but we are in cooldown. Just update the MOG2 background state.
                     pass
             
-            # No sleep delay. We run the MOG2 loop as fast as the hardware allows to minimize capture latency.
+            # Small sleep to restrict MOG2 loop to ~10 FPS. 
+            # If this runs too fast, the 500-frame background history absorbs slow-moving objects!
+            time.sleep(0.1)
 
     except KeyboardInterrupt:
         logging.info("\n🛑 Shutting down Rook Engine...")
