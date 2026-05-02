@@ -26,6 +26,7 @@ MIN_EMAIL_SCORE = 15            # Score threshold for real-time email/MMS alerts
 MIN_SLACK_SCORE = 1             # Score threshold for lightweight Slack pings
 THERMAL_CHECK_INTERVAL = 30     # Seconds between SoC temp reads (not per-frame)
 DIGEST_HOUR = 3                 # 3 AM — mathematically least-active hour, minimizes missed captures
+HEARTBEAT_INTERVAL = 6 * 3600  # Slack heartbeat every 6 hours (confirms system alive)
 LOG_FILE = os.path.expanduser("~/rook.log")
 BEAST_CAM_DIR = os.path.expanduser("~/beast_cam")  # Wildlife crop cache
 
@@ -346,6 +347,22 @@ def send_slack_alert(emoji_summary):
         logging.error(f"❌ Failed to send Slack alert: {e}")
 
 
+def send_heartbeat():
+    """Periodic Slack ping confirming the engine is alive. Fires every HEARTBEAT_INTERVAL seconds."""
+    webhook_url = os.environ.get("SLACK_WEBHOOK_URL")
+    if not webhook_url:
+        return
+    temp = get_temp()
+    uptime = open("/proc/uptime").read().split()[0]
+    hours = int(float(uptime)) // 3600
+    text = f"💚 Rook heartbeat — system active | {temp:.1f}°C | up {hours}h"
+    try:
+        httpx.post(webhook_url, json={"text": text}, timeout=5.0)
+        logging.info(f"💚 Heartbeat sent: {temp:.1f}°C, up {hours}h")
+    except Exception as e:
+        logging.warning(f"Heartbeat failed (non-critical): {e}")
+
+
 def dispatch_alerts_async(img_score, emojis, out_path, detected_classes):
     """Fire email and Slack in parallel background threads — main loop never blocks.
 
@@ -425,6 +442,12 @@ def main():
     last_daytime_check = time.time()
     last_thermal_check = 0
     last_digest_date = None
+    last_heartbeat = time.time()  # Prevents immediate heartbeat on startup
+
+    # Startup notification
+    threading.Thread(target=send_slack_alert,
+                     args=("💚 Rook engine started — system armed and watching.",),
+                     daemon=True).start()
 
     logging.info("🛡️ Rook is armed and watching...")
 
@@ -435,9 +458,15 @@ def main():
             if now_mono - last_thermal_check > THERMAL_CHECK_INTERVAL:
                 if get_temp() > 80.0:
                     logging.error("🚨🔥 CRITICAL THERMAL LIMIT REACHED! Initiating Emergency Shutdown...")
+                    send_slack_alert("🔴🔥 Rook THERMAL SHUTDOWN — SoC exceeded 80°C. Device halting.")
                     os.system("sudo shutdown -h now")
                     break
                 last_thermal_check = now_mono
+
+            # ── Heartbeat (every 6h) ────────────────────────────────────────
+            if now_mono - last_heartbeat > HEARTBEAT_INTERVAL:
+                threading.Thread(target=send_heartbeat, daemon=True).start()
+                last_heartbeat = now_mono
 
             # ── Capture & orient frame ─────────────────────────────────────
             frame = cam.capture_array()
