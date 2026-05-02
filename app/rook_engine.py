@@ -290,8 +290,8 @@ def main():
                 if now - last_alert_time > COOLDOWN_SECONDS:
                     logging.info(f"🚨 Motion Detected ({motion_pixels} px)! Running YOLO...")
                     
-                    # Run YOLO on the full-res frame
-                    results = model(frame, imgsz=640, conf=0.45, verbose=False)
+                    # Run YOLO on the full-res frame at intermediate resolution (800px)
+                    results = model(frame, imgsz=800, conf=0.45, verbose=False)
                     
                     # Extract all classes detected (with duplicates for counting)
                     detected_classes = [results[0].names[int(c)] for c in results[0].boxes.cls]
