@@ -32,7 +32,11 @@ Events that break the typical pattern or require mild attention.
 | Emoji | Event | Translation |
 | :---: | :--- | :--- |
 | `🦌` | Large Wildlife | "A deer or similar large animal is in the area." |
-| `🦊` | Small Wildlife | "A fox, raccoon, or similar animal is roaming." |
+| `🦊` | Medium Wildlife | "A fox, coyote, or similar animal is roaming." |
+| `🦝🗑️` | Scavengers | "A raccoon or opossum (often near trash bins)." |
+| `🐻` | Bear | "A bear detected in the perimeter." |
+| `🦅` / `🦉` | Large Birds | "A hawk, owl, or large bird of prey detected." |
+| `🐿️` | Small Wildlife | "Squirrels, rabbits, or small rodents." |
 | `🐕⚠️` | Loose Dog | "A dog is present without a visible owner/leash." |
 | `🚲💨` | Sidewalk Cyclist | "A bicycle/scooter is moving quickly on the pedestrian path." |
 | `🚗🅿️` | Unfamiliar Parking | "A vehicle has parked in an unusual or restricted spot." |
@@ -48,6 +52,20 @@ High-priority alerts that bypass rate limits and quiet hours.
 | `⚠️🌡️` | Thermal Warning | "System temperature reached 75°C. Monitor closely." |
 | `🔴🔥` | Thermal Shutdown | "System temperature reached 85°C. Inference suspended to prevent damage." |
 | `🔋📉` | Low Voltage | "Under-voltage detected from the power supply (⚡ icon)." |
+
+## 5. Weather & Environmental Conditions
+*Note: These require future integration with either visual heuristics (e.g., detecting snow accumulation) or a local weather API.*
+
+| Emoji | Event | Translation |
+| :---: | :--- | :--- |
+| `🌧️☔` | Heavy Rain | "Heavy rainfall or downpour detected." |
+| `❄️⛄` | Snow/Blizzard | "Snowfall or significant snow accumulation." |
+| `🌫️👀` | Dense Fog | "Visibility is severely reduced due to fog." |
+| `💨🍃` | High Winds | "Strong winds (detected via severe branch movement)." |
+| `⛈️⚡` | Thunderstorm | "Lightning flashes or severe storm conditions." |
+| `🌅` / `🌇` | Sunrise/Sunset | "Transition between day/night vision modes." |
+| `🌈` | Rainbow | "A rainbow is visible in the sky." |
+| `✨🌌` | Clear Night | "High visibility night sky (stars visible)." |
 
 ---
 *Note: Emergency alerts (`🚨`, `🚧`) include a secure, time-limited link to an anonymized bounding-box frame for visual verification.*
