@@ -27,20 +27,52 @@ import cv2
 import smtplib
 from email.message import EmailMessage
 import mimetypes
+from suntime import Sun
+import datetime
 
+
+def is_daytime():
+    """Determine if it is currently daytime based on local coordinates."""
+    # Default to Boston/Cambridge coordinates; override via .env
+    lat = float(os.environ.get("LATITUDE", "42.37"))
+    lon = float(os.environ.get("LONGITUDE", "-71.11"))
+    
+    sun = Sun(lat, lon)
+    now = datetime.datetime.now(datetime.timezone.utc)
+    
+    try:
+        sr = sun.get_sunrise_time()
+        ss = sun.get_sunset_time()
+        return sr < now < ss
+    except Exception:
+        # Fallback to simple time check if sun math fails (e.g. polar regions)
+        hour = datetime.datetime.now().hour
+        return 6 <= hour <= 18
 
 def capture_frame():
-    """Capture a single 1080p frame from the Arducam B0444."""
+    """Capture a single 1080p frame from the Arducam B0444 with dynamic exposure."""
     cam = Picamera2()
     cam.configure(cam.create_still_configuration(main={"size": (1920, 1080)}))
     cam.start()
     
-    # Configure for low-light / underexposed conditions
+    daytime = is_daytime()
+    
+    # Configure exposure dynamically based on the sun
     try:
-        cam.set_controls({
-            "ExposureValue": 2.0,           # Push AE target brighter (+2 EV)
-            "FrameDurationLimits": (33333, 100000) # Allow up to 100ms exposure (10fps min) for light gathering
-        })
+        if daytime:
+            # Daytime: Fast shutter, zero EV bias to prevent overexposure
+            cam.set_controls({
+                "ExposureValue": 0.0,
+                "FrameDurationLimits": (33333, 33333) # Lock to 30fps max exposure
+            })
+            print("☀️  Daytime mode: Standard exposure")
+        else:
+            # Nighttime: Longer shutter, slight EV boost
+            cam.set_controls({
+                "ExposureValue": 1.0,           # Slight boost (lowered from 2.0 to prevent blowout)
+                "FrameDurationLimits": (33333, 100000) # Allow up to 100ms exposure (10fps min)
+            })
+            print("🌙 Nighttime mode: Extended low-light exposure")
     except Exception as e:
         print(f"⚠️  Could not set advanced camera controls: {e}")
         
