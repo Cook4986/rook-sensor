@@ -34,7 +34,18 @@ def capture_frame():
     cam = Picamera2()
     cam.configure(cam.create_still_configuration(main={"size": (1920, 1080)}))
     cam.start()
-    time.sleep(2)  # Let auto-exposure settle
+    
+    # Configure for low-light / underexposed conditions
+    try:
+        cam.set_controls({
+            "ExposureValue": 2.0,           # Push AE target brighter (+2 EV)
+            "FrameDurationLimits": (33333, 100000) # Allow up to 100ms exposure (10fps min) for light gathering
+        })
+    except Exception as e:
+        print(f"⚠️  Could not set advanced camera controls: {e}")
+        
+    time.sleep(3)  # Let auto-exposure settle with new limits
+    
     frame = cam.capture_array()
     cam.stop()
     cam.close()
