@@ -175,8 +175,8 @@ SMTP_PORT=587
 SMTP_USER=your.email@gmail.com
 SMTP_PASS=your_16_char_app_password
 NOTIFY_EMAIL=your.email@gmail.com
-LATITUDE=42.37
-LONGITUDE=-71.11
+LATITUDE=your_latitude
+LONGITUDE=your_longitude
 FLIP_180=1
 EOF
 ```

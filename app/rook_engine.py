@@ -103,8 +103,8 @@ def translate_to_emoji_summary(detected_classes):
 
 
 # ── Sun / Day-Night (cached at module level) ──────────────────────────────────
-_lat = float(os.environ.get("LATITUDE", "42.37"))
-_lon = float(os.environ.get("LONGITUDE", "-71.11"))
+_lat = float(os.environ.get("LATITUDE", "0.0"))
+_lon = float(os.environ.get("LONGITUDE", "0.0"))
 _sun = Sun(_lat, _lon)
 
 

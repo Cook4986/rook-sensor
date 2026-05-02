@@ -33,9 +33,8 @@ import datetime
 
 def is_daytime():
     """Determine if it is currently daytime based on local coordinates."""
-    # Default to Boston/Cambridge coordinates; override via .env
-    lat = float(os.environ.get("LATITUDE", "42.37"))
-    lon = float(os.environ.get("LONGITUDE", "-71.11"))
+    lat = float(os.environ.get("LATITUDE", "0.0"))
+    lon = float(os.environ.get("LONGITUDE", "0.0"))
     
     sun = Sun(lat, lon)
     now = datetime.datetime.now(datetime.timezone.utc)
