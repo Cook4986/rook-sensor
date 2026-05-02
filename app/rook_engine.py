@@ -20,6 +20,7 @@ MOTION_THRESHOLD_PIXELS = 3000  # How many pixels must change to trigger YOLO
 COOLDOWN_SECONDS = 60           # Minimum seconds between alerts
 QUIET_HOURS_START = 23          # 11 PM
 QUIET_HOURS_END = 6             # 6 AM
+MIN_ALERT_SCORE = 15            # Minimum score to trigger real-time Email/Slack
 LOG_FILE = os.path.expanduser("~/rook.log")
 logging.basicConfig(
     level=logging.INFO,
@@ -239,6 +240,7 @@ def main():
     mog = cv2.createBackgroundSubtractorMOG2(history=500, varThreshold=50, detectShadows=False)
     
     last_alert_time = 0
+    last_detected_classes = []  # State tracking for redundancy (parked cars)
     flip_180 = os.environ.get("FLIP_180", "1") == "1"
     last_daytime_check = time.time()
     last_digest_date = None
@@ -298,6 +300,15 @@ def main():
                         logging.info("   Ghost motion (no objects found). Ignored.")
                         continue
                         
+                    # State check: prevent redundant alerts for parked cars/lingering objects
+                    if sorted(detected_classes) == sorted(last_detected_classes):
+                        logging.info("   Redundant objects (no change in scene). Ignored.")
+                        # Reset cooldown so we don't alert the moment the cooldown expires if they are still there
+                        last_alert_time = time.time()
+                        continue
+                        
+                    last_detected_classes = detected_classes
+                    
                     # Translate to rich emoji summary
                     emojis = translate_to_emoji_summary(detected_classes)
                     logging.info(f"   Identified: {emojis}")
@@ -315,12 +326,15 @@ def main():
                         best_daily_image = {"score": img_score, "path": best_path, "summary": emojis}
                         logging.info(f"   🏆 New Daily High Score: {img_score}!")
                     
-                    # Dispatch logic
-                    if not is_quiet_hours():
-                        send_email_alert(emojis, out_path)
-                        send_slack_alert(emojis)
+                    # Dispatch logic: Only alert in real-time if it's a high-ranked event
+                    if img_score >= MIN_ALERT_SCORE:
+                        if not is_quiet_hours():
+                            send_email_alert(emojis, out_path)
+                            send_slack_alert(emojis)
+                        else:
+                            logging.info(f"   🔕 Quiet hours active. Alert suppressed: {emojis}")
                     else:
-                        logging.info(f"   🔕 Quiet hours active. Alert suppressed: {emojis}")
+                        logging.info(f"   📉 Routine event (Score: {img_score}). Confined to daily digest.")
                         
                     last_alert_time = time.time()
                 else:
