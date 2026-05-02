@@ -21,6 +21,7 @@ Rook uses an interactive viewfinder. When you trigger a test, Rook will capture 
 3. **Review the image:** Check your inbox for the annotated photo.
 
 ### Evaluation Checklist
+- **Is it upside down?** If the landscape framing is correct but the world is upside down, do *not* physically re-mount it. Simply toggle the software rotation by adding `FLIP_180=0` or `FLIP_180=1` to your `~/rook-env/.env` file.
 - **Is the horizon level?** Adjust the suction cup rotation.
 - **Is there indoor glare?** Ensure the lens or silicone hood is pressed *flush* against the glass to block interior room reflections, which will severely degrade nighttime performance.
 - **Is the target visible?** Ensure the street/sidewalk is in the center third of the image.

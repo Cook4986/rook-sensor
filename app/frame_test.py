@@ -38,6 +38,11 @@ def capture_frame():
     frame = cam.capture_array()
     cam.stop()
     cam.close()
+    
+    # Software 180-degree rotation (default True for current physical mount)
+    if os.environ.get("FLIP_180", "1") == "1":
+        frame = cv2.rotate(frame, cv2.ROTATE_180)
+        
     return frame
 
 
