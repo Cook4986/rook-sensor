@@ -17,15 +17,17 @@ from rook_weather import RookEnrichment
 # Load Environment Variables
 load_dotenv(os.path.expanduser("~/rook-env/.env"))
 
-# Constants & Tunables
-MOTION_THRESHOLD_PIXELS = 500   # FIX #3: Lowered from 3000 — distant pedestrians occupy ~500px at 640x360
-COOLDOWN_SECONDS = 60           # Minimum seconds between ALERTS (not inference)
+# ── Constants & Tunables ───────────────────────────────────────────────────────
+MOTION_THRESHOLD_PIXELS = 500   # Lowered: distant pedestrians ~500px at 640x360
+COOLDOWN_SECONDS = 60           # Minimum seconds between ALERTS (not between inference)
 QUIET_HOURS_START = 23          # 11 PM
 QUIET_HOURS_END = 6             # 6 AM
-MIN_EMAIL_SCORE = 15            # Score threshold for heavy Email/MMS alerts
-MIN_SLACK_SCORE = 1             # Score threshold for lightweight real-time Slack pings
-THERMAL_CHECK_INTERVAL = 30     # FIX #6: Check temp every 30s, not every 100ms frame
+MIN_EMAIL_SCORE = 15            # Score threshold for real-time email/MMS alerts
+MIN_SLACK_SCORE = 1             # Score threshold for lightweight Slack pings
+THERMAL_CHECK_INTERVAL = 30     # Seconds between SoC temp reads (not per-frame)
 LOG_FILE = os.path.expanduser("~/rook.log")
+BEAST_CAM_DIR = os.path.expanduser("~/beast_cam")  # Wildlife crop cache
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -35,7 +37,7 @@ logging.basicConfig(
     ]
 )
 
-# Base YOLO COCO to Emoji map
+# ── COCO Class → Emoji ────────────────────────────────────────────────────────
 EMOJI_MAP = {
     "person": "🚶", "backpack": "🎒", "umbrella": "☂️", "suitcase": "🧳", "cell phone": "📱",
     "skateboard": "🛹", "sports ball": "⚽", "frisbee": "🥏", "kite": "🪁",
@@ -45,7 +47,7 @@ EMOJI_MAP = {
     "bear": "🐻", "horse": "🐎", "sheep": "🐑", "cow": "🐄"
 }
 
-# Rarity scores — used for daily digest ranking and alert gating
+# ── Rarity Scores (daily digest ranking + alert gating) ───────────────────────
 SCORE_MAP = {
     "person": 1, "car": 1, "dog": 2, "bicycle": 2,
     "truck": 5, "bus": 5, "motorcycle": 3,
@@ -55,15 +57,24 @@ SCORE_MAP = {
     "bear": 100, "horse": 50, "sheep": 50, "cow": 50
 }
 
+# ── Daily Stats Category Membership ──────────────────────────────────────────
+TRAFFIC_CLASSES     = {"car", "truck", "bus", "motorcycle", "bicycle"}
+PEDESTRIAN_CLASSES  = {"person"}
+ANIMAL_CLASSES      = {"bird", "dog", "cat", "bear", "horse", "sheep", "cow"}
+DELIVERY_CLASSES    = {"truck"}   # Subset of traffic; delivery heuristic
+WILDLIFE_CLASSES    = ANIMAL_CLASSES  # Alias used for Beast Cam crop caching
+
+
+# ── Translation Heuristics ────────────────────────────────────────────────────
 def translate_to_emoji_summary(detected_classes):
     """
-    Applies heuristics to raw YOLO classes.
-    Defaults to single symbols, only adding composite clarification for anomalies (e.g. Loose Dog).
+    Converts raw YOLO class list to compact emoji string.
+    Defaults to single symbols; composite only for anomalies (e.g. loose dog).
     """
     summary = []
     counts = {c: detected_classes.count(c) for c in set(detected_classes)}
 
-    # 1. Crowd heuristics
+    # Crowd heuristics
     if counts.get("person", 0) > 3:
         summary.append("🏟️")
         counts["person"] = 0
@@ -71,12 +82,12 @@ def translate_to_emoji_summary(detected_classes):
         summary.append("👥")
         counts["person"] = 0
 
-    # 2. Anomaly: Loose Dog (dog with no person in scene)
+    # Anomaly: Loose Dog (dog with no person in scene)
     if counts.get("dog", 0) > 0 and counts.get("person", 0) == 0:
         summary.append("🐕⚠️")
         counts["dog"] = 0
 
-    # 3. Everything else as single symbols
+    # Everything else as single symbols
     for obj, count in counts.items():
         if count > 0:
             emoji = EMOJI_MAP.get(obj, f"[{obj}]")
@@ -84,29 +95,30 @@ def translate_to_emoji_summary(detected_classes):
 
     return " ".join(summary)
 
-# FIX #1: Cache Sun object and coordinates at module level — not reconstructed every call
+
+# ── Sun / Day-Night (cached at module level) ──────────────────────────────────
 _lat = float(os.environ.get("LATITUDE", "42.37"))
 _lon = float(os.environ.get("LONGITUDE", "-71.11"))
 _sun = Sun(_lat, _lon)
 
+
 def is_daytime():
-    """Mathematical sun position for dynamic exposure limits."""
     now = datetime.now(timezone.utc)
     try:
         return _sun.get_sunrise_time() < now < _sun.get_sunset_time()
     except Exception:
         return 6 <= datetime.now().hour <= 18
 
+
 def is_quiet_hours():
-    """Check if current time is within suppressed quiet hours."""
     hour = datetime.now().hour
     if QUIET_HOURS_START <= QUIET_HOURS_END:
         return QUIET_HOURS_START <= hour < QUIET_HOURS_END
-    else:
-        return hour >= QUIET_HOURS_START or hour < QUIET_HOURS_END
+    return hour >= QUIET_HOURS_START or hour < QUIET_HOURS_END
 
+
+# ── Scoring ───────────────────────────────────────────────────────────────────
 def calculate_image_score(detected_classes):
-    """Assigns a rarity score to an image based on the YOLO detections."""
     score = 0
     counts = {c: detected_classes.count(c) for c in set(detected_classes)}
     for obj, count in counts.items():
@@ -115,16 +127,18 @@ def calculate_image_score(detected_classes):
     score += len(counts) * 5
     return int(score)
 
+
+# ── Thermal ───────────────────────────────────────────────────────────────────
 def get_temp():
-    """Reads the Raspberry Pi SoC temperature in Celsius."""
     try:
         with open('/sys/class/thermal/thermal_zone0/temp', 'r') as f:
             return float(f.read()) / 1000.0
     except Exception:
         return 0.0
 
+
+# ── Camera Exposure ───────────────────────────────────────────────────────────
 def configure_camera_exposure(cam):
-    """Sets camera EV and frame duration limits based on day/night."""
     if is_daytime():
         cam.set_controls({"ExposureValue": 0.0, "FrameDurationLimits": (33333, 33333)})
         logging.info("☀️  Camera locked to Daytime Exposure")
@@ -132,10 +146,42 @@ def configure_camera_exposure(cam):
         cam.set_controls({"ExposureValue": 1.0, "FrameDurationLimits": (33333, 100000)})
         logging.info("🌙 Camera locked to Nighttime Exposure")
 
-def send_daily_digest(notify_email, best_image_data):
-    """Compiles the daily log file and emails it at 6 PM, including the most interesting photo."""
+
+# ── Beast Cam: Cache wildlife crops for batch species ID ──────────────────────
+def save_beast_cam_crop(frame_rgb, boxes, classes, names, today_dir):
+    """
+    Saves individual cropped bounding boxes for each detected wildlife object
+    to the Beast Cam directory. Zero inference cost — pure crop + save.
+    """
+    os.makedirs(today_dir, exist_ok=True)
+    ts = datetime.now().strftime("%H%M%S_%f")
+    for i, (box, cls_idx) in enumerate(zip(boxes, classes)):
+        cls_name = names[int(cls_idx)]
+        if cls_name not in WILDLIFE_CLASSES:
+            continue
+        x1, y1, x2, y2 = [int(v) for v in box.xyxy[0]]
+        # Add 10% padding around the crop
+        h, w = frame_rgb.shape[:2]
+        pad_x = int((x2 - x1) * 0.1)
+        pad_y = int((y2 - y1) * 0.1)
+        x1, y1 = max(0, x1 - pad_x), max(0, y1 - pad_y)
+        x2, y2 = min(w, x2 + pad_x), min(h, y2 + pad_y)
+        crop = cv2.cvtColor(frame_rgb[y1:y2, x1:x2], cv2.COLOR_RGB2BGR)
+        fname = os.path.join(today_dir, f"{cls_name}_{ts}_{i}.jpg")
+        cv2.imwrite(fname, crop)
+
+
+# ── Daily Digest ──────────────────────────────────────────────────────────────
+def send_daily_digest(notify_email, best_image_data, daily_stats, beast_cam_today_dir):
+    """
+    Sends a structured daily digest at 6 PM with:
+    - Activity summary totals (Traffic, Pedestrians, Animals, Deliveries)
+    - Top detected event of the day (image attached)
+    - Beast Cam section (all wildlife crops from today)
+    - System health (temp, uptime)
+    - Raw log as inline text
+    """
     try:
-        logging.info("Generating daily 6 PM digest...")
         smtp_server = os.environ.get("SMTP_SERVER")
         smtp_port = int(os.environ.get("SMTP_PORT", 587))
         smtp_user = os.environ.get("SMTP_USER")
@@ -145,41 +191,105 @@ def send_daily_digest(notify_email, best_image_data):
             logging.error("Missing SMTP credentials for daily digest.")
             return
 
-        with open(LOG_FILE, "r") as f:
-            logs = f.read()
+        today = datetime.now().strftime('%A, %B %-d %Y')
+        temp_now = get_temp()
 
+        # ── Build structured email body ────────────────────────────────────
+        lines = [
+            f"🦅  ROOK DAILY DIGEST — {today}",
+            "=" * 48,
+            "",
+            "📊  ACTIVITY SUMMARY",
+            f"   🚗  Traffic:      {daily_stats['traffic']} events",
+            f"   🚶  Pedestrians:  {daily_stats['pedestrians']} events",
+            f"   🐾  Animals:      {daily_stats['animals']} events",
+            f"   📦  Deliveries:   {daily_stats['deliveries']} events",
+            f"   📋  Total events: {daily_stats['total_events']}",
+            "",
+        ]
+
+        if best_image_data["path"] and os.path.exists(best_image_data["path"]):
+            lines += [
+                f"🏆  TOP EVENT OF THE DAY",
+                f"   {best_image_data['summary']}  (Score: {best_image_data['score']})",
+                "   (See attached image)",
+                "",
+            ]
+
+        # Beast Cam summary
+        beast_crops = []
+        if os.path.isdir(beast_cam_today_dir):
+            beast_crops = sorted([
+                os.path.join(beast_cam_today_dir, f)
+                for f in os.listdir(beast_cam_today_dir)
+                if f.endswith(".jpg")
+            ])
+
+        if beast_crops:
+            lines += [
+                f"🐾  BEAST CAM — {len(beast_crops)} wildlife detection(s) today",
+                "   (Cropped images attached below)",
+                "",
+            ]
+        else:
+            lines += ["🐾  BEAST CAM — No wildlife detected today.", ""]
+
+        # System health
+        lines += [
+            "🖥️  SYSTEM HEALTH",
+            f"   🌡️  Current SoC Temp: {temp_now:.1f}°C",
+            f"   📅  Report generated: {datetime.now().strftime('%H:%M:%S')}",
+            "",
+            "─" * 48,
+            "RAW LOG (today):",
+            "",
+        ]
+
+        # Append raw log
+        try:
+            with open(LOG_FILE, "r") as f:
+                lines.append(f.read())
+        except Exception:
+            lines.append("[Log unavailable]")
+
+        body = "\n".join(lines)
+
+        # ── Compose email ──────────────────────────────────────────────────
         msg = EmailMessage()
-        msg["Subject"] = f"Rook Daily Digest - {datetime.now().strftime('%Y-%m-%d')}"
+        msg["Subject"] = f"🦅 Rook Daily Digest — {datetime.now().strftime('%b %-d')}"
         msg["From"] = smtp_user
         msg["To"] = notify_email
-
-        body = f"Rook System Logs for the day:\n\n{logs}"
-        if best_image_data["path"] and os.path.exists(best_image_data["path"]):
-            body = f"🏆 Top Activity: {best_image_data['summary']} (Score: {best_image_data['score']})\n\n" + body
-
         msg.set_content(body)
 
+        # Attach best image
         if best_image_data["path"] and os.path.exists(best_image_data["path"]):
-            ctype, _ = mimetypes.guess_type(best_image_data["path"])
-            maintype, subtype = (ctype or "image/jpeg").split("/", 1)
             with open(best_image_data["path"], "rb") as f:
-                msg.add_attachment(f.read(), maintype=maintype, subtype=subtype, filename="daily_highlight.jpg")
+                msg.add_attachment(f.read(), maintype="image", subtype="jpeg",
+                                   filename="top_event.jpg")
+
+        # Attach Beast Cam crops (max 10 to keep email size reasonable)
+        for crop_path in beast_crops[:10]:
+            with open(crop_path, "rb") as f:
+                fname = os.path.basename(crop_path)
+                msg.add_attachment(f.read(), maintype="image", subtype="jpeg", filename=fname)
 
         with smtplib.SMTP(smtp_server, smtp_port) as server:
             server.starttls()
             server.login(smtp_user, smtp_pass)
             server.send_message(msg)
 
-        logging.info(f"📧 Daily digest sent to {notify_email}")
+        logging.info(f"📧 Daily digest sent to {notify_email} ({len(beast_crops)} beast cam crops)")
 
+        # Reset log
         with open(LOG_FILE, "w") as f:
             f.write(f"--- Rook Log Reset ({datetime.now().strftime('%Y-%m-%d %H:%M:%S')}) ---\n")
 
     except Exception as e:
         logging.error(f"❌ Failed to send daily digest: {e}")
 
+
+# ── Real-Time Alert Dispatch ──────────────────────────────────────────────────
 def send_email_alert(emoji_summary, image_path):
-    """Dispatch alert via SMTP. Runs in a background thread."""
     try:
         smtp_server = os.environ.get("SMTP_SERVER")
         smtp_port = int(os.environ.get("SMTP_PORT", 587))
@@ -211,129 +321,133 @@ def send_email_alert(emoji_summary, image_path):
     except Exception as e:
         logging.error(f"❌ Failed to send email alert: {e}")
 
+
 def send_slack_alert(emoji_summary):
-    """Dispatch real-time text alert via Slack Webhook. Runs in a background thread."""
     webhook_url = os.environ.get("SLACK_WEBHOOK_URL")
     if not webhook_url:
         return
     try:
-        payload = {"text": emoji_summary}
-        httpx.post(webhook_url, json=payload, timeout=5.0)
+        httpx.post(webhook_url, json={"text": emoji_summary}, timeout=5.0)
         logging.info("💬 Slack alert sent!")
     except Exception as e:
         logging.error(f"❌ Failed to send Slack alert: {e}")
 
-# FIX #8: Non-blocking dispatch — fires both alerts in parallel background threads
+
 def dispatch_alerts_async(img_score, emojis, out_path):
-    """Fire email and Slack alerts in background threads so the main loop never blocks."""
+    """Fire email and Slack in parallel background threads — main loop never blocks."""
     if is_quiet_hours():
         logging.info(f"   🔕 Quiet hours active. Alert suppressed: {emojis}")
         return
 
-    dispatched = False
     threads = []
-
     if img_score >= MIN_EMAIL_SCORE:
-        t = threading.Thread(target=send_email_alert, args=(emojis, out_path), daemon=True)
-        threads.append(t)
-        dispatched = True
-
+        threads.append(threading.Thread(target=send_email_alert, args=(emojis, out_path), daemon=True))
     if img_score >= MIN_SLACK_SCORE:
-        t = threading.Thread(target=send_slack_alert, args=(emojis,), daemon=True)
-        threads.append(t)
-        dispatched = True
+        threads.append(threading.Thread(target=send_slack_alert, args=(emojis,), daemon=True))
 
-    for t in threads:
-        t.start()
-
-    if not dispatched:
+    if threads:
+        for t in threads:
+            t.start()
+    else:
         logging.info(f"   📉 Routine event (Score: {img_score}). Confined to daily digest.")
 
-# Classes that trigger iNat species hint lookup
-WILDLIFE_CLASSES = {"bird", "dog", "cat", "bear", "horse", "sheep", "cow"}
 
-
+# ── Main Loop ─────────────────────────────────────────────────────────────────
 def main():
     logging.info("🚀 Initializing Rook Engine...")
 
-    # Boot YOLO
-    logging.info("🧠 Loading YOLOv11n...")
     model = YOLO("yolo11n.pt")
+    logging.info("🧠 YOLOv11n loaded.")
 
-    # Boot Camera — native 1080p capture, MOG2 gates on 640x360 downscale, YOLO runs at 1088px
     cam = Picamera2()
     cam.configure(cam.create_video_configuration(main={"size": (1920, 1080)}))
     cam.start()
     configure_camera_exposure(cam)
 
-    # Tuned MOG2 — history=200 (20s window), varThreshold=40 (more sensitive)
     mog = cv2.createBackgroundSubtractorMOG2(history=200, varThreshold=40, detectShadows=False)
 
-    # Boot enrichment service (weather + local species context — zero compute cost)
-    enrichment = RookEnrichment(
-        lat=float(os.environ.get("LATITUDE", "42.37")),
-        lon=float(os.environ.get("LONGITUDE", "-71.11")),
-    )
-    enrichment.start()   # Launches background threads, non-blocking
+    # Enrichment: weather + local iNat species context (zero inference cost)
+    enrichment = RookEnrichment(lat=_lat, lon=_lon)
+    enrichment.start()
     logging.info("🌍 Enrichment service started (weather + iNat species context)")
+
+    # ── Per-day state ──────────────────────────────────────────────────────
+    def fresh_stats():
+        return {"traffic": 0, "pedestrians": 0, "animals": 0, "deliveries": 0, "total_events": 0}
+
+    daily_stats = fresh_stats()
+    best_daily_image = {"score": 0, "path": None, "summary": ""}
+    today_date = datetime.now().strftime('%Y-%m-%d')
+    beast_cam_today_dir = os.path.join(BEAST_CAM_DIR, today_date)
+    os.makedirs(beast_cam_today_dir, exist_ok=True)
 
     last_alert_time = 0
     last_detected_classes = []
     flip_180 = os.environ.get("FLIP_180", "1") == "1"
     last_daytime_check = time.time()
+    last_thermal_check = 0
     last_digest_date = None
-    last_thermal_check = 0          # FIX #6: Tracks last temp read time
-    best_daily_image = {"score": 0, "path": None, "summary": ""}
 
     logging.info("🛡️ Rook is armed and watching...")
 
     try:
         while True:
-            # FIX #6: Thermal check rate-limited to every 30 seconds (not every 100ms frame)
+            # ── Thermal guard (every 30s, not per-frame) ───────────────────
             now_mono = time.time()
             if now_mono - last_thermal_check > THERMAL_CHECK_INTERVAL:
                 if get_temp() > 80.0:
-                    logging.error("🚨🔥 CRITICAL THERMAL LIMIT REACHED! Initiating Emergency Hardware Shutdown...")
+                    logging.error("🚨🔥 CRITICAL THERMAL LIMIT REACHED! Initiating Emergency Shutdown...")
                     os.system("sudo shutdown -h now")
                     break
                 last_thermal_check = now_mono
 
-            # Capture full 1080p frame
+            # ── Capture & orient frame ─────────────────────────────────────
             frame = cam.capture_array()
-
-            # Drop alpha channel (Picamera2 returns XBGR8888)
             if frame.shape[2] == 4:
                 frame = frame[:, :, :3]
-
             if flip_180:
                 frame = cv2.rotate(frame, cv2.ROTATE_180)
 
-            # FIX #4: Explicit BGR→RGB conversion before YOLO (COCO weights trained on RGB)
+            # Explicit BGR→RGB for YOLO (COCO weights trained on RGB)
             frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
-            # Downscale ONLY for fast MOG2 motion gate — YOLO still gets full 1080p RGB frame
+            # ── Motion gate (MOG2 on 640×360 downscale) ───────────────────
             small_frame = cv2.resize(frame, (640, 360))
             fgmask = mog.apply(small_frame)
             motion_pixels = cv2.countNonZero(fgmask)
 
-            # Frame heuristics: fog / extreme low-light detection (<5ms, numpy only)
+            # Frame heuristics: fog/low-light (<5ms)
             frame_condition = RookEnrichment.analyze_frame(frame)
 
-            # Daily Digest Trigger (6 PM / 18:00)
+            # ── Date rollover & daily digest trigger ───────────────────────
             now_hour = datetime.now().hour
-            today_date = datetime.now().strftime('%Y-%m-%d')
-            if now_hour == 18 and last_digest_date != today_date:
-                send_daily_digest(os.environ.get("NOTIFY_EMAIL"), best_daily_image)
-                last_digest_date = today_date
+            new_date = datetime.now().strftime('%Y-%m-%d')
+
+            if new_date != today_date:
+                # Midnight rollover: reset all daily state
+                today_date = new_date
+                beast_cam_today_dir = os.path.join(BEAST_CAM_DIR, today_date)
+                os.makedirs(beast_cam_today_dir, exist_ok=True)
+                daily_stats = fresh_stats()
                 best_daily_image = {"score": 0, "path": None, "summary": ""}
 
-            # Periodically re-evaluate day/night exposure (every 10 mins)
+            if now_hour == 18 and last_digest_date != today_date:
+                yesterday_dir = os.path.join(BEAST_CAM_DIR, today_date)
+                send_daily_digest(
+                    os.environ.get("NOTIFY_EMAIL"),
+                    best_daily_image,
+                    daily_stats,
+                    yesterday_dir,
+                )
+                last_digest_date = today_date
+
+            # Re-evaluate exposure every 10 minutes
             if now_mono - last_daytime_check > 600:
                 configure_camera_exposure(cam)
                 last_daytime_check = now_mono
 
+            # ── YOLO inference (always runs on motion) ─────────────────────
             if motion_pixels > MOTION_THRESHOLD_PIXELS:
-                # FIX #2: ALWAYS run YOLO on motion — cooldown only gates ALERTS, not inference
                 results = model(frame_rgb, imgsz=1088, conf=0.25, verbose=False)
                 detected_classes = [results[0].names[int(c)] for c in results[0].boxes.cls]
 
@@ -342,32 +456,54 @@ def main():
                     time.sleep(0.1)
                     continue
 
+                # ── Update daily stats ─────────────────────────────────────
+                daily_stats["total_events"] += 1
+                for cls in set(detected_classes):
+                    if cls in TRAFFIC_CLASSES:
+                        daily_stats["traffic"] += 1
+                    if cls in PEDESTRIAN_CLASSES:
+                        daily_stats["pedestrians"] += 1
+                    if cls in ANIMAL_CLASSES:
+                        daily_stats["animals"] += 1
+                    if cls in DELIVERY_CLASSES:
+                        daily_stats["deliveries"] += 1
+
+                # ── Beast Cam: cache wildlife crops (async, non-blocking) ──
+                wildlife_in_frame = [c for c in detected_classes if c in WILDLIFE_CLASSES]
+                if wildlife_in_frame:
+                    threading.Thread(
+                        target=save_beast_cam_crop,
+                        args=(frame_rgb, results[0].boxes, results[0].boxes.cls,
+                              results[0].names, beast_cam_today_dir),
+                        daemon=True,
+                    ).start()
+
+                # ── Build alert string ─────────────────────────────────────
                 emojis = translate_to_emoji_summary(detected_classes)
 
-                # Append weather emoji if conditions are notable
+                # Append notable weather condition
                 weather_emoji = enrichment.get_weather_emoji()
                 if weather_emoji and enrichment.get_weather_score_bonus() > 0:
                     emojis = f"{emojis} {weather_emoji}"
 
-                # Append frame-level condition (fog / deep night)
+                # Append vision-detected frame condition (fog / deep night)
                 if frame_condition:
                     emojis = f"{emojis} {frame_condition}"
 
-                # Append species hint for wildlife classes (zero inference cost)
-                wildlife_detected = [c for c in set(detected_classes) if c in WILDLIFE_CLASSES]
-                if wildlife_detected:
-                    hint = enrichment.get_species_hint(wildlife_detected[0])
+                # Append local species hint for wildlife (no inference cost)
+                if wildlife_in_frame:
+                    hint = enrichment.get_species_hint(wildlife_in_frame[0])
                     if hint:
                         emojis = f"{emojis} {hint}"
 
                 logging.info(f"   Identified: {emojis}")
 
-                # Save annotated image to tmpfs
+                # Save annotated alert image to tmpfs
                 annotated = results[0].plot()
                 out_path = "/tmp/rook_alert.jpg"
                 cv2.imwrite(out_path, annotated)
 
-                # Score and track best daily image
+                # Daily best image tracking
                 img_score = calculate_image_score(detected_classes)
                 if img_score > best_daily_image["score"]:
                     best_path = "/tmp/rook_best_daily.jpg"
@@ -375,7 +511,7 @@ def main():
                     best_daily_image = {"score": img_score, "path": best_path, "summary": emojis}
                     logging.info(f"   🏆 New Daily High Score: {img_score}!")
 
-                # Gate ALERTS on cooldown — inference above always runs
+                # ── Alert gate (cooldown + redundancy) ────────────────────
                 now = time.time()
                 if now - last_alert_time > COOLDOWN_SECONDS:
                     if sorted(detected_classes) == sorted(last_detected_classes):
@@ -386,7 +522,6 @@ def main():
 
                 last_detected_classes = detected_classes
 
-            # MOG2 loop at ~10 FPS — prevents fast background absorption of slow-moving subjects
             time.sleep(0.1)
 
     except KeyboardInterrupt:
@@ -394,6 +529,7 @@ def main():
     finally:
         cam.stop()
         cam.close()
+
 
 if __name__ == "__main__":
     main()
