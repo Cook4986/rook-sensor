@@ -73,7 +73,8 @@ Camera (IMX462 STARVIS)
 | Thermal | Easycargo heatsink kit | Passive aluminum + copper. ~37°C idle, ~46°C under inference. |
 | Mount | Juxiamal 41mm PVC suction cups (M5) | 4× window-mount, screw-nut style |
 | Assembly | M2.5 Standoffs / Screws | Required for Pi 5 mounting points (85mm × 56mm). Custom 3D clip needed for B0444. |
-| Power | Besgoods 5V/3A USB-A charger | + Itramax 10ft flat USB-A→USB-C cable. *Requires high quality/short cable to prevent brownouts.* |
+| Power | Modular 5V/5A USB-C PD Charger | Standard laptop chargers cap at 3A. Pi 5 requires a **5V/5A** profile for full peripheral power. |
+| Power Cable | 10ft Flat 100W USB-C to USB-C Cable | Must have 5A E-Marker chip. Flat profile required to route through window sill gaps. |
 
 **Prototype cost:** ~$213 all-in. Full purchase history in [`device/bom.md`](device/bom.md).
 
@@ -269,15 +270,16 @@ rook-sensor/
 - [x] Arducam Pivariety driver + first light (1920×1080 @ 60fps)
 - [x] YOLOv11n benchmark (~350ms CPU-only)
 - [x] Tailscale VPN remote access
-- [x] Twilio account + A2P 10DLC registration
-- [ ] MOG2 fast motion loop + zone masking
-- [ ] Detection → emoji state machine + SMS rate limiter
-- [ ] Quiet hours + SMS command interface (`FRAME`, `QUIET`, `STOP`)
-- [ ] Thermal monitor (75°C warn / 85°C shutdown via SMS)
+- [x] Twilio account + A2P 10DLC registration (Fallback/SMS)
+- [x] Slack Webhook integration (Primary real-time alerts)
+- [x] MOG2 fast motion loop + zone masking
+- [x] Detection → emoji state machine + alert rate limiter
+- [x] Quiet hours + daily 6 PM SMTP log/image digest
+- [x] Thermal monitor (Hard cutoff at 80°C to prevent hardware damage)
 - [ ] `rook.service` — systemd unit for boot persistence + crash recovery
 - [ ] Next.js dashboard (Supabase + Vercel)
 - [ ] v2 housing (3D-printed enclosure, silicone suction cups)
-- [ ] AI HAT+ upgrade (Hailo-8L, 13 TOPS → sub-100ms inference)
+- [ ] AI HAT+ upgrade (Hailo-8L, 13 TOPS → native 1080p @ 30fps)
 
 ### Upgrade Path
 
