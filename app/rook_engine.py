@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 from picamera2 import Picamera2
 from ultralytics import YOLO
 from suntime import Sun
+import httpx
 
 # Load Environment Variables
 load_dotenv(os.path.expanduser("~/rook-env/.env"))
@@ -127,7 +128,20 @@ def send_email_alert(emoji_summary, image_path):
             
         print(f"📧 Alert dispatched to {notify_email}")
     except Exception as e:
-        print(f"❌ Failed to send alert: {e}")
+        print(f"❌ Failed to send email alert: {e}")
+
+def send_slack_alert(emoji_summary):
+    """Dispatch real-time text alert via Slack Webhook."""
+    webhook_url = os.environ.get("SLACK_WEBHOOK_URL")
+    if not webhook_url:
+        return
+        
+    try:
+        payload = {"text": f"Rook Activity: {emoji_summary}"}
+        httpx.post(webhook_url, json=payload, timeout=5.0)
+        print("💬 Slack alert sent!")
+    except Exception as e:
+        print(f"❌ Failed to send Slack alert: {e}")
 
 def main():
     print("🚀 Initializing Rook Engine...")
@@ -199,6 +213,7 @@ def main():
                     # Dispatch logic
                     if not is_quiet_hours():
                         send_email_alert(emojis, out_path)
+                        send_slack_alert(emojis)
                     else:
                         print(f"   🔕 Quiet hours active. Alert suppressed: {emojis}")
                         
