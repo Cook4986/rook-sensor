@@ -19,8 +19,8 @@ from rook_weather import RookEnrichment
 load_dotenv(os.path.expanduser("~/rook-env/.env"))
 
 # ── Constants & Tunables ───────────────────────────────────────────────────────
-MOTION_THRESHOLD_PIXELS = 1000  # Tuned: requires meaningful total motion to wake YOLO
-MOTION_BLOB_MIN_PIXELS = 120    # Min contiguous blob at 640x360 ≈ 11×11px — catches small animals, rejects leaf scatter
+MOTION_THRESHOLD_PIXELS = 1500  # Total changed pixels in 640x360 — raised to reduce wind/shadow false positives
+MOTION_BLOB_MIN_PIXELS = 250    # Min contiguous blob at 640x360 — ~18x18px; catches animals, rejects leaf scatter
 COOLDOWN_SECONDS = 60           # Minimum seconds between ALERTS (not between inference)
 QUIET_HOURS_START = 23          # 11 PM
 QUIET_HOURS_END = 6             # 6 AM
@@ -776,19 +776,23 @@ def main():
                 detected_classes = [results[0].names[int(c)] for c in results[0].boxes.cls]
 
                 if not detected_classes:
-                    # Rate-limit SD writes: max 1 unclassified save per ARCHIVE_RATE_LIMIT_SECONDS
-                    # Prevents write storms (2500+ files/day) from thrashing the SD card & heating the SoC
                     now_mono_arc = time.time()
                     last_archive_save = getattr(main, '_last_archive_save', 0)
                     if now_mono_arc - last_archive_save >= ARCHIVE_RATE_LIMIT_SECONDS:
-                        logging.info("   Ghost motion (unclassified). Archiving frame for training.")
-                        archive_dir = os.path.expanduser("~/rook-archive/unclassified")
-                        os.makedirs(archive_dir, exist_ok=True)
-                        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-                        # Save at MOG2 resolution (640x360) — 8x smaller, correct scale for YOLO training
-                        small_save = cv2.resize(frame, (640, 360))
-                        cv2.imwrite(os.path.join(archive_dir, f"unclassified_{ts}.jpg"), small_save)
-                        main._last_archive_save = now_mono_arc
+                        # Visual interest gate: skip frames with no real content (pure wind/shadow/noise)
+                        # Laplacian variance measures edge density — low variance = blurry/empty/uniform frame
+                        gray = cv2.cvtColor(small_frame, cv2.COLOR_BGR2GRAY)
+                        visual_interest = cv2.Laplacian(gray, cv2.CV_64F).var()
+                        if visual_interest < 80:
+                            logging.debug(f"   Ghost motion (low visual interest: {visual_interest:.0f}). Skipping archive.")
+                        else:
+                            logging.info(f"   Ghost motion (interest={visual_interest:.0f}). Archiving frame for training.")
+                            archive_dir = os.path.expanduser("~/rook-archive/unclassified")
+                            os.makedirs(archive_dir, exist_ok=True)
+                            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                            small_save = cv2.resize(frame, (640, 360))
+                            cv2.imwrite(os.path.join(archive_dir, f"unclassified_{ts}.jpg"), small_save)
+                            main._last_archive_save = now_mono_arc
                     else:
                         logging.debug("   Ghost motion (rate-limited, skipping save).")
                     time.sleep(0.15)
