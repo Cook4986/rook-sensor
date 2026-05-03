@@ -26,4 +26,7 @@ mkdir -p "$LOCAL_ARCHIVE"
 # runs its 7-day purge, we keep our copies forever on the Mac.
 rsync -avz --ignore-existing -e "ssh -o StrictHostKeyChecking=no" "${PI_USER}@${PI_HOST}:~/rook-archive/" "$LOCAL_ARCHIVE/"
 
+# Also sync the Beast Cam crops
+rsync -avz --ignore-existing -e "ssh -o StrictHostKeyChecking=no" "${PI_USER}@${PI_HOST}:~/beast_cam/" "$LOCAL_ARCHIVE/beast_cam/"
+
 echo "[$(date)] Sync complete."
