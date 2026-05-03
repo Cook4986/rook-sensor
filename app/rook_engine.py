@@ -72,7 +72,6 @@ SCORE_MAP = {
     # ─ Background / silent solo ───────────────────────────────────────────────
     "car":         1,
     "bicycle":     1,
-    "bird":        3,   # Elevated — large raptors score higher via heuristic
     "cell phone":  2,
     # ─ Pedestrian activity ────────────────────────────────────────────────────
     "person":      2,
@@ -101,6 +100,7 @@ SCORE_MAP = {
     "train":       6,
     "airplane":   12,
     # ─ Wildlife ───────────────────────────────────────────────────────────────
+    "bird":       10,   # Airborne activity scores high, but gated by strict confidence interval
     "horse":       8,
     # ─ Critical ───────────────────────────────────────────────────────────────
     "bear":      100,
@@ -770,10 +770,22 @@ def main():
             if motion_pixels > MOTION_THRESHOLD_PIXELS and largest_blob > MOTION_BLOB_MIN_PIXELS:
                 # Adaptive confidence: more sensitive during quiet hours (11PM-6AM)
                 # when a missed detection is worse than a false positive
-                conf_threshold = 0.25 if is_quiet_hours() else 0.30
+                base_conf = 0.25 if is_quiet_hours() else 0.30
                 frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                results = model(frame_rgb, imgsz=1088, conf=conf_threshold, verbose=False)
-                detected_classes = [results[0].names[int(c)] for c in results[0].boxes.cls]
+                # Run YOLO at a lower baseline to catch everything, filter dynamic classes next
+                results = model(frame_rgb, imgsz=1088, conf=base_conf, verbose=False)
+                
+                # Dynamic Confidence Interval: Airborne objects require higher certainty
+                AIRBORNE_CLASSES = {"bird", "airplane", "kite"}
+                AIRBORNE_CONF_REQ = 0.45
+                
+                detected_classes = []
+                for i, cls_id in enumerate(results[0].boxes.cls):
+                    cls_name = results[0].names[int(cls_id)]
+                    conf = float(results[0].boxes.conf[i])
+                    if cls_name in AIRBORNE_CLASSES and conf < AIRBORNE_CONF_REQ:
+                        continue  # Skip low-confidence airborne objects (distant noise)
+                    detected_classes.append(cls_name)
 
                 if not detected_classes:
                     now_mono_arc = time.time()
