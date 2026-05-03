@@ -19,9 +19,9 @@ ssh rook@192.168.1.151 "cat > ~/rook-env/.env << 'EOF'
 SLACK_WEBHOOK_URL=https://hooks.slack.com/services/YOUR/WEBHOOK/URL
 SMTP_SERVER=smtp.gmail.com
 SMTP_PORT=587
-SMTP_USER=matt@mncook.net
+SMTP_USER=your_email@gmail.com
 SMTP_PASS=your_16_char_app_password
-NOTIFY_EMAIL=matt@mncook.net
+NOTIFY_EMAIL=your_email@gmail.com
 LATITUDE=40.7128
 LONGITUDE=-74.0060
 FLIP_180=1
