@@ -550,7 +550,15 @@ def _purge_old_beast_cam(days: int = 7):
 def main():
     logging.info("🚀 Initializing Rook Engine...")
 
-    model = YOLO("yolo11n.pt")
+    # Load NCNN model for 3x faster inference (exported from yolo11n.pt at imgsz=1088).
+    # Falls back to PyTorch .pt if NCNN model is not present on device.
+    _ncnn_path = os.path.expanduser("~/yolo11n_1088_ncnn_model")
+    if os.path.isdir(_ncnn_path):
+        model = YOLO(_ncnn_path, task="detect")
+        logging.info("🚀 YOLOv11n loaded (NCNN — 3× faster inference).")
+    else:
+        model = YOLO("yolo11n.pt")
+        logging.warning("⚠️  NCNN model not found, falling back to PyTorch.")
     logging.info("🧠 YOLOv11n loaded.")
 
     cam = Picamera2()
