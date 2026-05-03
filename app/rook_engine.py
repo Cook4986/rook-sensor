@@ -560,7 +560,7 @@ def main():
 
             # ── YOLO inference (always runs on motion) ─────────────────────
             if motion_pixels > MOTION_THRESHOLD_PIXELS:
-                results = model(frame_rgb, imgsz=1088, conf=0.25, verbose=False)
+                results = model(frame_rgb, imgsz=1088, conf=0.30, verbose=False)
                 detected_classes = [results[0].names[int(c)] for c in results[0].boxes.cls]
 
                 if not detected_classes:
@@ -608,11 +608,11 @@ def main():
                 if frame_condition:
                     emojis = f"{emojis} {frame_condition}"
 
-                # Append local species hint for wildlife (no inference cost)
+                # Local species hint is logged, but EXCLUDED from the emoji notification
                 if wildlife_in_frame:
                     hint = enrichment.get_species_hint(wildlife_in_frame[0])
                     if hint:
-                        emojis = f"{emojis} {hint}"
+                        logging.info(f"   iNat species context: {hint}")
 
                 logging.info(f"   Identified: {emojis}")
 
