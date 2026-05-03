@@ -7,6 +7,7 @@ from email.message import EmailMessage
 import mimetypes
 from datetime import datetime, timezone
 import logging
+from logging.handlers import RotatingFileHandler
 from dotenv import load_dotenv
 from picamera2 import Picamera2
 from ultralytics import YOLO
@@ -37,11 +38,14 @@ BEAST_CAM_DIR = os.path.expanduser("~/beast_cam")  # Wildlife crop cache
 # Pre-compute MOG2 dilation kernel once at module load (avoid per-frame allocation)
 _MOG2_KERNEL = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
 
+# ── Logging: rotate at 5MB, keep 3 backups — prevents SD card fill after weeks of runtime
+_log_handler = RotatingFileHandler(LOG_FILE, maxBytes=5 * 1024 * 1024, backupCount=3)
+_log_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler(LOG_FILE),
+        _log_handler,
         logging.StreamHandler()
     ]
 )
@@ -555,7 +559,13 @@ def main():
     _ncnn_path = os.path.expanduser("~/yolo11n_1088_ncnn_model")
     if os.path.isdir(_ncnn_path):
         model = YOLO(_ncnn_path, task="detect")
-        logging.info("🚀 YOLOv11n loaded (NCNN — 3× faster inference).")
+        # Pin NCNN to 3 of Pi 5's 4 cores — leaves 1 for OS/camera ISP, reduces contention
+        try:
+            import ncnn
+            ncnn.set_num_threads(3)
+            logging.info("🚀 YOLOv11n loaded (NCNN, 3 threads).")
+        except Exception:
+            logging.info("🚀 YOLOv11n loaded (NCNN).")
     else:
         model = YOLO("yolo11n.pt")
         logging.warning("⚠️  NCNN model not found, falling back to PyTorch.")
@@ -590,6 +600,7 @@ def main():
     last_thermal_check = 0
     last_digest_date = None
     last_heartbeat = time.time()  # Prevents immediate heartbeat on startup
+    warmup_frame_count = 0        # MOG2 warmup: skip first 30 frames (no background model yet)
 
     # Startup notification — rate-limited to prevent spam during rapid restarts/power cycles.
     # Only fires if the engine has been down for > 5 minutes (i.e., a real restart, not a crash loop).
@@ -668,6 +679,15 @@ def main():
                 _contours, _ = cv2.findContours(fgmask_dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
                 largest_blob = max((cv2.contourArea(c) for c in _contours), default=0)
 
+            # ── MOG2 warmup guard ──────────────────────────────────────────
+            # First 30 frames: MOG2 has no background model, everything looks like motion.
+            # Skip YOLO entirely during this phase to avoid noisy startup burst detections.
+            warmup_frame_count += 1
+            if warmup_frame_count <= 30:
+                mog.apply(small_frame)  # Feed frames to build background, but don't act on them
+                time.sleep(0.15)
+                continue
+
             # Frame heuristics: fog/low-light (<5ms) — only when motion qualifies
             frame_condition = RookEnrichment.analyze_frame(frame) if largest_blob > MOTION_BLOB_MIN_PIXELS else None
 
@@ -702,9 +722,11 @@ def main():
 
             # ── YOLO inference (always runs on motion) ─────────────────────
             if motion_pixels > MOTION_THRESHOLD_PIXELS and largest_blob > MOTION_BLOB_MIN_PIXELS:
-                # Convert BGR→RGB only when YOLO actually fires (deferred to save CPU on quiet frames)
+                # Adaptive confidence: more sensitive during quiet hours (11PM-6AM)
+                # when a missed detection is worse than a false positive
+                conf_threshold = 0.25 if is_quiet_hours() else 0.30
                 frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                results = model(frame_rgb, imgsz=1088, conf=0.30, verbose=False)
+                results = model(frame_rgb, imgsz=1088, conf=conf_threshold, verbose=False)
                 detected_classes = [results[0].names[int(c)] for c in results[0].boxes.cls]
 
                 if not detected_classes:
@@ -717,7 +739,9 @@ def main():
                         archive_dir = os.path.expanduser("~/rook-archive/unclassified")
                         os.makedirs(archive_dir, exist_ok=True)
                         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-                        cv2.imwrite(os.path.join(archive_dir, f"unclassified_{ts}.jpg"), frame)
+                        # Save at MOG2 resolution (640x360) — 8x smaller, correct scale for YOLO training
+                        small_save = cv2.resize(frame, (640, 360))
+                        cv2.imwrite(os.path.join(archive_dir, f"unclassified_{ts}.jpg"), small_save)
                         main._last_archive_save = now_mono_arc
                     else:
                         logging.debug("   Ghost motion (rate-limited, skipping save).")
@@ -781,7 +805,10 @@ def main():
 
                 # ── Alert gate (cooldown + redundancy) ────────────────────
                 now = time.time()
-                if now - last_alert_time > COOLDOWN_SECONDS:
+                # Score-adaptive cooldown: high-priority events (bear, truck) break through quickly.
+                # Curve: score ≥ 60 → 10s cooldown; score=8 → 52s; score=0 → full 60s
+                effective_cooldown = max(10, COOLDOWN_SECONDS - img_score)
+                if now - last_alert_time > effective_cooldown:
                     if sorted(detected_classes) == sorted(last_detected_classes):
                         logging.info("   Redundant scene (no change). Skipping alert.")
                         last_alert_time = now  # Reset cooldown to avoid burst on next cycle
