@@ -19,8 +19,8 @@ from rook_weather import RookEnrichment
 load_dotenv(os.path.expanduser("~/rook-env/.env"))
 
 # ── Constants & Tunables ───────────────────────────────────────────────────────
-MOTION_THRESHOLD_PIXELS = 1500  # Total changed pixels in 640x360 — raised to reduce wind/shadow false positives
-MOTION_BLOB_MIN_PIXELS = 250    # Min contiguous blob at 640x360 — ~18x18px; catches animals, rejects leaf scatter
+MOTION_THRESHOLD_PIXELS = 600   # Low threshold to catch distant park activity (few changed pixels at range)
+MOTION_BLOB_MIN_PIXELS = 80     # Min contiguous blob — ~9x9px at 640x360; sensitive to small far subjects
 COOLDOWN_SECONDS = 60           # Minimum seconds between ALERTS (not between inference)
 QUIET_HOURS_START = 23          # 11 PM
 QUIET_HOURS_END = 6             # 6 AM
