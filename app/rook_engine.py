@@ -19,8 +19,8 @@ from rook_weather import RookEnrichment
 load_dotenv(os.path.expanduser("~/rook-env/.env"))
 
 # ── Constants & Tunables ───────────────────────────────────────────────────────
-MOTION_THRESHOLD_PIXELS = 600   # Low threshold to catch distant park activity (few changed pixels at range)
-MOTION_BLOB_MIN_PIXELS = 80     # Min contiguous blob — ~9x9px at 640x360; sensitive to small far subjects
+MOTION_THRESHOLD_PIXELS = 200   # ~50-100px changed for a 30px far subject; 200 passes anything YOLO can detect
+MOTION_BLOB_MIN_PIXELS = 80     # Min contiguous blob after dilation — ~9x9px at 640x360; clears distant 30px subjects
 COOLDOWN_SECONDS = 60           # Minimum seconds between ALERTS (not between inference)
 QUIET_HOURS_START = 23          # 11 PM
 QUIET_HOURS_END = 6             # 6 AM
