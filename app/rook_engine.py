@@ -18,17 +18,24 @@ from rook_weather import RookEnrichment
 load_dotenv(os.path.expanduser("~/rook-env/.env"))
 
 # ── Constants & Tunables ───────────────────────────────────────────────────────
-MOTION_THRESHOLD_PIXELS = 500   # Lowered: distant pedestrians ~500px at 640x360
+MOTION_THRESHOLD_PIXELS = 1000  # Tuned: requires meaningful total motion to wake YOLO
+MOTION_BLOB_MIN_PIXELS = 120    # Min contiguous blob at 640x360 ≈ 11×11px — catches small animals, rejects leaf scatter
 COOLDOWN_SECONDS = 60           # Minimum seconds between ALERTS (not between inference)
 QUIET_HOURS_START = 23          # 11 PM
 QUIET_HOURS_END = 6             # 6 AM
 MIN_EMAIL_SCORE = 20            # Score threshold for real-time email/MMS — unusual wildlife, rare events
 MIN_SLACK_SCORE = 1             # Score threshold for lightweight Slack pings
 THERMAL_CHECK_INTERVAL = 30     # Seconds between SoC temp reads (not per-frame)
+THERMAL_SOFT_LIMIT = 65.0       # °C: skip 2/3 frames to reduce CPU load
+THERMAL_WARN_LIMIT = 72.0       # °C: skip 5/6 frames — aggressive cooldown before hard 80°C shutdown
+ARCHIVE_RATE_LIMIT_SECONDS = 30 # Minimum seconds between unclassified frame saves (kills SD write storms)
 DIGEST_HOUR = 3                 # 3 AM — mathematically least-active hour, minimizes missed captures
 HEARTBEAT_INTERVAL = 6 * 3600  # Slack heartbeat every 6 hours (confirms system alive)
 LOG_FILE = os.path.expanduser("~/rook.log")
 BEAST_CAM_DIR = os.path.expanduser("~/beast_cam")  # Wildlife crop cache
+
+# Pre-compute MOG2 dilation kernel once at module load (avoid per-frame allocation)
+_MOG2_KERNEL = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
 
 logging.basicConfig(
     level=logging.INFO,
@@ -518,16 +525,38 @@ def main():
             if flip_180:
                 frame = cv2.rotate(frame, cv2.ROTATE_180)
 
-            # Explicit BGR→RGB for YOLO (COCO weights trained on RGB)
-            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            # ── Thermal-aware frame skipping ───────────────────────────────
+            # Read temp from cache (updated every THERMAL_CHECK_INTERVAL seconds)
+            current_temp = get_temp()
+            frame_counter = getattr(main, '_frame_counter', 0) + 1
+            main._frame_counter = frame_counter
+            if current_temp >= THERMAL_WARN_LIMIT:
+                # 72°C+: process 1 in 6 frames — aggressive cooldown
+                if frame_counter % 6 != 0:
+                    time.sleep(0.2)
+                    continue
+            elif current_temp >= THERMAL_SOFT_LIMIT:
+                # 65°C+: process 1 in 3 frames — moderate throttle
+                if frame_counter % 3 != 0:
+                    time.sleep(0.15)
+                    continue
 
             # ── Motion gate (MOG2 on 640×360 downscale) ───────────────────
             small_frame = cv2.resize(frame, (640, 360))
             fgmask = mog.apply(small_frame)
             motion_pixels = cv2.countNonZero(fgmask)
 
-            # Frame heuristics: fog/low-light (<5ms)
-            frame_condition = RookEnrichment.analyze_frame(frame)
+            # Two-stage gate: cheap pixel count first, expensive blob analysis only if needed.
+            # Dilation merges nearby pixels so small animals form one measurable blob.
+            # Wind scatter stays diffuse and fails the blob floor even after dilation.
+            largest_blob = 0
+            if motion_pixels > MOTION_THRESHOLD_PIXELS:
+                fgmask_dilated = cv2.dilate(fgmask, _MOG2_KERNEL, iterations=1)
+                _contours, _ = cv2.findContours(fgmask_dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                largest_blob = max((cv2.contourArea(c) for c in _contours), default=0)
+
+            # Frame heuristics: fog/low-light (<5ms) — only when motion qualifies
+            frame_condition = RookEnrichment.analyze_frame(frame) if largest_blob > MOTION_BLOB_MIN_PIXELS else None
 
             # ── Date rollover & daily digest trigger ───────────────────────
             now_hour = datetime.now().hour
@@ -559,19 +588,25 @@ def main():
                 last_daytime_check = now_mono
 
             # ── YOLO inference (always runs on motion) ─────────────────────
-            if motion_pixels > MOTION_THRESHOLD_PIXELS:
+            if motion_pixels > MOTION_THRESHOLD_PIXELS and largest_blob > MOTION_BLOB_MIN_PIXELS:
                 results = model(frame_rgb, imgsz=1088, conf=0.30, verbose=False)
                 detected_classes = [results[0].names[int(c)] for c in results[0].boxes.cls]
 
                 if not detected_classes:
-                    logging.info("   Ghost motion (unclassified object). Archiving frame for future training.")
-                    # Export classless object motion to a dedicated archive
-                    archive_dir = os.path.expanduser("~/rook-archive/unclassified")
-                    os.makedirs(archive_dir, exist_ok=True)
-                    ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-                    # Save the raw frame (BGR) that triggered motion but failed COCO classification
-                    cv2.imwrite(os.path.join(archive_dir, f"unclassified_{ts}.jpg"), frame)
-                    time.sleep(0.1)
+                    # Rate-limit SD writes: max 1 unclassified save per ARCHIVE_RATE_LIMIT_SECONDS
+                    # Prevents write storms (2500+ files/day) from thrashing the SD card & heating the SoC
+                    now_mono_arc = time.time()
+                    last_archive_save = getattr(main, '_last_archive_save', 0)
+                    if now_mono_arc - last_archive_save >= ARCHIVE_RATE_LIMIT_SECONDS:
+                        logging.info("   Ghost motion (unclassified). Archiving frame for training.")
+                        archive_dir = os.path.expanduser("~/rook-archive/unclassified")
+                        os.makedirs(archive_dir, exist_ok=True)
+                        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                        cv2.imwrite(os.path.join(archive_dir, f"unclassified_{ts}.jpg"), frame)
+                        main._last_archive_save = now_mono_arc
+                    else:
+                        logging.debug("   Ghost motion (rate-limited, skipping save).")
+                    time.sleep(0.15)
                     continue
 
                 # ── Update daily stats ─────────────────────────────────────
@@ -641,7 +676,7 @@ def main():
 
                 last_detected_classes = detected_classes
 
-            time.sleep(0.1)
+            time.sleep(0.15)  # Base loop cadence: ~6fps max, reduces idle CPU heat
 
     except KeyboardInterrupt:
         logging.info("\n🛑 Shutting down Rook Engine...")
