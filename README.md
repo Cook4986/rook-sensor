@@ -289,7 +289,6 @@ rook-sensor/
 
 | Issue | Resolution |
 |-------|------------|
-| B0444 not detected on CAM/DISP 0 | Use **CAM/DISP 1** — Pivariety MCU only works on `cam1` |
 | `dtoverlay=imx462` fails | B0444 is Pivariety. Use `dtoverlay=arducam-pivariety,cam1` |
 | Arducam kernel compile fails on Trixie | Kernel driver compile (`-p kernel_driver`) is **no longer required** on Pi 5. The overlay is native. Just install `libcamera_dev` and `libcamera_apps`. |
 | Apt fails on `libatlas-base-dev` | Package is unavailable in Trixie. Use `libopenblas-dev` instead. |
