@@ -24,7 +24,7 @@ COOLDOWN_SECONDS = 60           # Minimum seconds between ALERTS (not between in
 QUIET_HOURS_START = 23          # 11 PM
 QUIET_HOURS_END = 6             # 6 AM
 MIN_EMAIL_SCORE = 20            # Score threshold for real-time email/MMS — unusual wildlife, rare events
-MIN_SLACK_SCORE = 1             # Score threshold for lightweight Slack pings
+MIN_SLACK_SCORE = 8             # Score threshold for Slack — solo car (score=6) silenced; dog walker+ fires
 THERMAL_CHECK_INTERVAL = 30     # Seconds between SoC temp reads (not per-frame)
 THERMAL_SOFT_LIMIT = 65.0       # °C: skip 2/3 frames to reduce CPU load
 THERMAL_WARN_LIMIT = 72.0       # °C: skip 5/6 frames — aggressive cooldown before hard 80°C shutdown
@@ -47,56 +47,99 @@ logging.basicConfig(
 )
 
 # ── COCO Class → Emoji ────────────────────────────────────────────────────────
+# Full COCO-80 coverage. Infrastructure classes included — if YOLO detects a
+# stop sign or fire hydrant moving/appearing, something interesting happened.
 EMOJI_MAP = {
-    "person": "🚶", "backpack": "🎒", "umbrella": "☂️", "suitcase": "🧳", "cell phone": "📱",
+    # People & personal items
+    "person": "🚶", "backpack": "🎒", "umbrella": "☂️", "suitcase": "🧳",
+    "cell phone": "📱", "handbag": "👜", "tie": "👔",
+    # Recreational
     "skateboard": "🛹", "sports ball": "⚽", "frisbee": "🥏", "kite": "🪁",
+    "skis": "⛷️", "snowboard": "🏂", "surfboard": "🏄", "tennis racket": "🎾",
+    "baseball bat": "⚾", "baseball glove": "🧤",
+    # Vehicles
     "bicycle": "🚲", "car": "🚗", "motorcycle": "🏍️",
-    "bus": "🚌", "truck": "🚚",
-    "dog": "🐕", "cat": "🐈", "bird": "🦅",
-    "bear": "🐻", "horse": "🐎", "sheep": "🐑", "cow": "🐄"
+    "bus": "🚌", "truck": "🚚", "train": "🚂", "boat": "⛵", "airplane": "✈️",
+    # Animals
+    "dog": "🐕", "cat": "🐈", "bird": "🦅", "bear": "🐻",
+    "horse": "🐎", "sheep": "🐑", "cow": "🐄",
+    "elephant": "🐘", "zebra": "🦓", "giraffe": "🦒",
+    # Urban infrastructure — static normally; detection = anomaly
+    "traffic light": "🚦", "stop sign": "🛑", "fire hydrant": "🚒",
+    "parking meter": "🅿️", "bench": "🪑",
+    # Food / objects (outdoor context: street fair, gathering)
+    "bottle": "🍾", "cup": "🥤", "bowl": "🥣",
+    "banana": "🍌", "pizza": "🍕", "hot dog": "🌭", "sandwich": "🥪",
+    "cake": "🎂", "donut": "🍩",
+    # Electronics / furniture (outdoor = anomaly)
+    "tv": "📺", "laptop": "💻", "chair": "🪑", "couch": "🛋️",
+    "potted plant": "🪴", "clock": "🕐", "vase": "🏺", "book": "📚",
+    "teddy bear": "🧸", "scissors": "✂️",
 }
 
 # ── Rarity Scores — urban yard context ───────────────────────────────────────
 # Score = how unusual is this in an urban yard? Routine → low. Anomaly/incident → high.
-# Barnyard classes are COCO misclassifications in urban context — silenced.
 SCORE_MAP = {
-    # ─ Routine (Slack-only) ───────────────────────────────────────────────────
-    "person":      2,   # Pedestrian — common
-    "dog":         4,   # Dog walker
-    "bird":        3,   # Common yard bird (robin, crow) — silent solo
+    # ─ Background / silent solo (scored but won't clear Slack threshold alone) ─
+    "car":         1,
+    "bicycle":     1,
+    "bird":        2,
+    "cell phone":  2,
+    "bench":       2,   # Static infrastructure — normally ignored by MOG2
+    # ─ Routine pedestrian activity ────────────────────────────────────────────
+    "person":      2,
+    "dog":         4,
     "backpack":    3,
     "umbrella":    3,
-    "cell phone":  2,
-    "motorcycle":  5,   # Road traffic; could be police motorcycle
-    # ─ Notable urban events ───────────────────────────────────────────────────
-    "bus":         8,   # Transit; large crowd vehicle
-    "truck":      12,   # Delivery/utility — OR fire truck/ambulance (same COCO class)
-    "suitcase":    8,   # Someone moving
-    "kite":        6,
-    "frisbee":     5,
-    "sports ball": 5,
     "skateboard":  4,
     "cat":         4,
-    # ─ Barnyard / urban COCO noise — silenced ────────────────────────────────
+    "motorcycle":  5,
+    # ─ Recreational / social gathering signals ────────────────────────────────
+    "sports ball": 5,   # Street play, park game
+    "frisbee":     5,
+    "kite":        6,   # Park activity; notable enough to flag
+    "tennis racket": 5,
+    "baseball bat": 8,  # Elevated — rare in urban context
+    # ─ Notable urban events ───────────────────────────────────────────────────
+    "bus":         8,   # Transit event / large crowd vehicle
+    "truck":      12,   # Delivery OR fire truck/ambulance (same COCO class)
+    "suitcase":    8,   # Someone moving in/out
+    "handbag":     4,
+    "tie":         5,   # Business activity, unusual outdoors
+    "boat":        10,  # Anomalous near a residential street
+    "train":       6,
+    "airplane":    8,   # Low-flying / anomaly
+    # ─ Infrastructure anomalies — static objects; motion detection = noteworthy
+    "traffic light": 10,  # Downed/missing traffic light = accident scene
+    "stop sign":    12,   # Downed stop sign = traffic hazard
+    "fire hydrant": 15,   # Open or moved hydrant = fire response / water main
+    "parking meter": 5,
+    # ─ Outdoor food / objects (implies gathering, street fair, incident)
+    "bottle":      5,
+    "pizza":       8,
+    "cake":       10,   # Outdoor birthday / street party
+    "hot dog":     6,   # Street vendor / food stall
+    # ─ Furniture outdoors (eviction, flood, altercation)
+    "tv":         20,   # TV on the sidewalk = eviction / large item dump
+    "couch":      20,   # Couch on sidewalk = same
+    "chair":       6,   # Outdoor seating (gathering) or dumped item
+    # ─ Barnyard COCO noise in urban context — near-silent ─────────────────────
     "sheep":       1,
     "cow":         1,
     "horse":       1,
     # ─ Critical ──────────────────────────────────────────────────────────────
     "bear":      100,
-    # ─ Silent solo ───────────────────────────────────────────────────────────
-    "car":         1,
-    "bicycle":     1,
 }
 
 # ── Daily Stats Category Membership ──────────────────────────────────────────
-TRAFFIC_CLASSES     = {"car", "truck", "bus", "motorcycle", "bicycle"}
+TRAFFIC_CLASSES     = {"car", "truck", "bus", "motorcycle", "bicycle", "train", "boat"}
 PEDESTRIAN_CLASSES  = {"person"}
-ANIMAL_CLASSES      = {"bird", "dog", "cat", "bear"}
+ANIMAL_CLASSES      = {"bird", "dog", "cat", "bear", "horse", "elephant", "zebra", "giraffe"}
 DELIVERY_CLASSES    = {"truck"}
 WILDLIFE_CLASSES    = ANIMAL_CLASSES
 
 # Classes silenced when appearing solo (too routine or urban COCO misclassification)
-SILENT_SOLO_CLASSES = {"car", "bicycle", "bird", "sheep", "cow", "horse"}
+SILENT_SOLO_CLASSES = {"car", "bicycle", "bird", "sheep", "cow", "horse", "bench", "parking meter"}
 
 
 
@@ -104,26 +147,77 @@ SILENT_SOLO_CLASSES = {"car", "bicycle", "bird", "sheep", "cow", "horse"}
 # ── Translation Heuristics ────────────────────────────────────────────────────
 def translate_to_emoji_summary(detected_classes):
     """
-    Converts raw YOLO class list to compact emoji string.
-    Defaults to single symbols; composite only for anomalies (e.g. loose dog).
+    Converts raw YOLO class list to compact, expressive emoji string.
+    Composite heuristics fire first to capture scene context; remainder
+    falls through to single-symbol rendering.
     """
     summary = []
     counts = {c: detected_classes.count(c) for c in set(detected_classes)}
+    night = not is_daytime()
 
-    # Crowd heuristics
-    if counts.get("person", 0) > 3:
-        summary.append("🏟️")
+    # ── Composite scene heuristics (order matters — most specific first) ────
+
+    # Large crowd
+    if counts.get("person", 0) >= 5:
+        summary.append("🏟️")           # Rally, incident, street closure
         counts["person"] = 0
-    elif counts.get("person", 0) > 1:
+    elif counts.get("person", 0) >= 2:
         summary.append("👥")
         counts["person"] = 0
 
-    # Anomaly: Loose Dog (dog with no person in scene)
+    # Cyclist (bicycle + person together = active rider, not abandoned bike)
+    if counts.get("bicycle", 0) > 0 and counts.get("person", 0) > 0:
+        summary.append("🚴")
+        counts["bicycle"] = 0
+        counts["person"] = max(0, counts.get("person", 0) - 1)
+
+    # Moving day (suitcase OR couch/tv outdoors + person)
+    moving_items = counts.get("suitcase", 0) + counts.get("couch", 0) + counts.get("tv", 0)
+    if moving_items > 0 and counts.get("person", 0) > 0:
+        summary.append("🚚📦")         # Moving in/out or eviction
+        counts["suitcase"] = 0
+        counts["couch"] = 0
+        counts["tv"] = 0
+
+    # Street party / outdoor gathering (food items + people)
+    party_food = counts.get("pizza", 0) + counts.get("cake", 0) + counts.get("hot dog", 0) + counts.get("bottle", 0)
+    if party_food > 0 and counts.get("person", 0) > 0:
+        summary.append("🎉")           # Street party, gathering, food stall
+        counts["pizza"] = counts["cake"] = counts["hot dog"] = counts["bottle"] = 0
+
+    # Loose dog (no person in scene)
     if counts.get("dog", 0) > 0 and counts.get("person", 0) == 0:
         summary.append("🐕⚠️")
         counts["dog"] = 0
 
-    # Everything else as single symbols
+    # Night walker (person detected during quiet hours)
+    if night and counts.get("person", 0) > 0:
+        summary.append("🌙🚶")
+        counts["person"] = 0
+
+    # Umbrella in use (umbrella + person = rain/weather event)
+    if counts.get("umbrella", 0) > 0 and counts.get("person", 0) > 0:
+        summary.append("🌂🚶")         # Active rain event
+        counts["umbrella"] = 0
+
+    # Street sports (ball/frisbee/kite + person)
+    play_items = counts.get("sports ball", 0) + counts.get("frisbee", 0) + counts.get("kite", 0)
+    if play_items > 0 and counts.get("person", 0) > 0:
+        summary.append("🏃⚽")         # Active street/park play
+        counts["sports ball"] = counts["frisbee"] = counts["kite"] = 0
+
+    # Infrastructure anomaly (stop sign / fire hydrant = potential incident)
+    if counts.get("stop sign", 0) > 0:
+        summary.append("🛑⚠️")         # Downed stop sign / road hazard
+        counts["stop sign"] = 0
+    if counts.get("fire hydrant", 0) > 0:
+        summary.append("🚒💧")         # Open/moved hydrant = fire response
+        counts["fire hydrant"] = 0
+    if counts.get("traffic light", 0) > 0:
+        summary.append("🚦⚠️")         # Downed/dark traffic light
+        counts["traffic light"] = 0
+
+    # ── Fallthrough: render remaining classes as single symbols ─────────────
     for obj, count in counts.items():
         if count > 0:
             emoji = EMOJI_MAP.get(obj, f"[{obj}]")
@@ -141,7 +235,14 @@ _sun = Sun(_lat, _lon)
 def is_daytime():
     now = datetime.now(timezone.utc)
     try:
-        return _sun.get_sunrise_time() < now < _sun.get_sunset_time()
+        sr = _sun.get_sunrise_time()
+        ss = _sun.get_sunset_time()
+        # FIX: suntime library bug — get_sunset_time() can return yesterday's date
+        # due to UTC offset crossings. If sunset < sunrise, push it forward 1 day.
+        import datetime as _dt
+        if ss < sr:
+            ss += _dt.timedelta(days=1)
+        return sr < now < ss
     except Exception:
         return 6 <= datetime.now().hour <= 18
 
@@ -178,6 +279,15 @@ def calculate_image_score(detected_classes, weather_bonus: int = 0):
 
     if counts.get("dog", 0) > 0 and counts.get("person", 0) == 0:
         score += 15   # Loose dog anomaly
+
+    # Furniture/appliances outdoors = eviction, flood, or large dump (high urgency)
+    outdoor_furniture = counts.get("tv", 0) + counts.get("couch", 0)
+    if outdoor_furniture > 0:
+        score += 25
+
+    # Quiet hours bonus: any person detected 11PM–6AM is inherently more notable
+    if is_quiet_hours() and counts.get("person", 0) > 0:
+        score += 20
 
     score += weather_bonus  # From enrichment: extreme weather WMO bonus
 
@@ -494,10 +604,26 @@ def main():
     last_digest_date = None
     last_heartbeat = time.time()  # Prevents immediate heartbeat on startup
 
-    # Startup notification
-    threading.Thread(target=send_slack_alert,
-                     args=("💚 Rook engine started — system armed and watching.",),
-                     daemon=True).start()
+    # Startup notification — rate-limited to prevent spam during rapid restarts/power cycles.
+    # Only fires if the engine has been down for > 5 minutes (i.e., a real restart, not a crash loop).
+    _startup_flag = "/tmp/rook_last_startup"
+    _min_startup_interval = 300  # 5 minutes
+    _now = time.time()
+    _last_startup = 0
+    try:
+        with open(_startup_flag, "r") as _f:
+            _last_startup = float(_f.read().strip())
+    except Exception:
+        pass
+    if _now - _last_startup > _min_startup_interval:
+        threading.Thread(target=send_slack_alert,
+                         args=("💚 Rook engine started — system armed and watching.",),
+                         daemon=True).start()
+    try:
+        with open(_startup_flag, "w") as _f:
+            _f.write(str(_now))
+    except Exception:
+        pass
 
     logging.info("🛡️ Rook is armed and watching...")
 
