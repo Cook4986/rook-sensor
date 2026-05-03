@@ -174,7 +174,7 @@ pip install --upgrade pip
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
 
 # App dependencies
-pip install ultralytics opencv-python-headless twilio httpx python-dotenv
+pip install ultralytics ncnn opencv-python-headless httpx python-dotenv
 
 # Fix numpy if system version conflicts
 pip install --force-reinstall numpy
@@ -183,7 +183,7 @@ pip install --force-reinstall numpy
 curl -fsSL https://tailscale.com/install.sh | sh
 sudo tailscale up   # Follow the auth URL
 
-# Twilio & Email credentials
+# Slack & Email credentials
 cat > ~/rook-env/.env << 'EOF'
 SLACK_WEBHOOK_URL=https://hooks.slack.com/services/...
 SMTP_SERVER=smtp.gmail.com
@@ -203,9 +203,10 @@ EOF
 |------|----------|
 | `python3 -c "import cv2; print(cv2.__version__)"` | 4.x.x |
 | `python3 -c "from ultralytics import YOLO; print('OK')"` | OK |
+| `python3 -c "import ncnn; print('OK')"` | OK |
 | `python3 -c "from picamera2 import Picamera2; print('OK')"` | OK |
 | `tailscale status` | Node "rook" online |
-| YOLOv11n benchmark (`python3 ~/frame_test.py --benchmark`) | < 100ms avg |
+| YOLOv11n test (`python3 ~/frame_test.py --email`) | NCNN loads, email sent |
 
 ---
 
@@ -226,11 +227,11 @@ iwconfig wlan0 | grep -i "signal level"
 # Acceptable: -30 to -65 dBm
 ```
 
-### SMS Viewfinder Test
+### Email Viewfinder Test
 
 ```bash
 source ~/rook-env/bin/activate
-python3 ~/frame_test.py --benchmark --sms
+python3 ~/frame_test.py --email
 ```
 
 ### Thermal Baseline
