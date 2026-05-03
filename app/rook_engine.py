@@ -47,87 +47,70 @@ logging.basicConfig(
 )
 
 # ── COCO Class → Emoji ────────────────────────────────────────────────────────
-# Full COCO-80 coverage. Infrastructure classes included — if YOLO detects a
-# stop sign or fire hydrant moving/appearing, something interesting happened.
+# Full coverage for animate subjects, activities, vehicles, and weather accessories.
+# Inanimate infrastructure (stop signs, hydrants, benches) intentionally excluded —
+# they are static background that YOLO classifies incidentally after MOG2 fires.
 EMOJI_MAP = {
     # People & personal items
     "person": "🚶", "backpack": "🎒", "umbrella": "☂️", "suitcase": "🧳",
     "cell phone": "📱", "handbag": "👜", "tie": "👔",
-    # Recreational
+    # Recreational / activity signals
     "skateboard": "🛹", "sports ball": "⚽", "frisbee": "🥏", "kite": "🪁",
     "skis": "⛷️", "snowboard": "🏂", "surfboard": "🏄", "tennis racket": "🎾",
     "baseball bat": "⚾", "baseball glove": "🧤",
-    # Vehicles
+    # Vehicles (animate — move through scene)
     "bicycle": "🚲", "car": "🚗", "motorcycle": "🏍️",
     "bus": "🚌", "truck": "🚚", "train": "🚂", "boat": "⛵", "airplane": "✈️",
-    # Animals
+    # Wildlife
     "dog": "🐕", "cat": "🐈", "bird": "🦅", "bear": "🐻",
     "horse": "🐎", "sheep": "🐑", "cow": "🐄",
     "elephant": "🐘", "zebra": "🦓", "giraffe": "🦒",
-    # Urban infrastructure — static normally; detection = anomaly
-    "traffic light": "🚦", "stop sign": "🛑", "fire hydrant": "🚒",
-    "parking meter": "🅿️", "bench": "🪑",
-    # Food / objects (outdoor context: street fair, gathering)
-    "bottle": "🍾", "cup": "🥤", "bowl": "🥣",
-    "banana": "🍌", "pizza": "🍕", "hot dog": "🌭", "sandwich": "🥪",
-    "cake": "🎂", "donut": "🍩",
-    # Electronics / furniture (outdoor = anomaly)
-    "tv": "📺", "laptop": "💻", "chair": "🪑", "couch": "🛋️",
-    "potted plant": "🪴", "clock": "🕐", "vase": "🏺", "book": "📚",
-    "teddy bear": "🧸", "scissors": "✂️",
 }
 
-# ── Rarity Scores — urban yard context ───────────────────────────────────────
-# Score = how unusual is this in an urban yard? Routine → low. Anomaly/incident → high.
+
+# Score = how notable is this for an urban street scene?
+# Animate subjects only: people, activities, wildlife, vehicles, atmospheric phenomena.
 SCORE_MAP = {
-    # ─ Background / silent solo (scored but won't clear Slack threshold alone) ─
+    # ─ Background / silent solo ───────────────────────────────────────────────────
     "car":         1,
     "bicycle":     1,
     "bird":        2,
     "cell phone":  2,
-    "bench":       2,   # Static infrastructure — normally ignored by MOG2
     # ─ Routine pedestrian activity ────────────────────────────────────────────
     "person":      2,
     "dog":         4,
-    "backpack":    3,
-    "umbrella":    3,
-    "skateboard":  4,
     "cat":         4,
+    "backpack":    3,
+    "umbrella":    5,   # Weather signal (active rain event)
+    "skateboard":  4,
     "motorcycle":  5,
-    # ─ Recreational / social gathering signals ────────────────────────────────
-    "sports ball": 5,   # Street play, park game
+    # ─ Recreational / activity signals ────────────────────────────────────────
+    "sports ball": 5,
     "frisbee":     5,
-    "kite":        6,   # Park activity; notable enough to flag
+    "kite":        8,   # Atmospheric: visible only in clear/windy outdoor conditions
     "tennis racket": 5,
-    "baseball bat": 8,  # Elevated — rare in urban context
-    # ─ Notable urban events ───────────────────────────────────────────────────
-    "bus":         8,   # Transit event / large crowd vehicle
-    "truck":      12,   # Delivery OR fire truck/ambulance (same COCO class)
+    "baseball bat": 8,
+    "skis":        12,  # Rare in NYC — weather or major novelty event
+    "snowboard":   12,
+    "surfboard":   10,
     "suitcase":    8,   # Someone moving in/out
     "handbag":     4,
-    "tie":         5,   # Business activity, unusual outdoors
-    "boat":        10,  # Anomalous near a residential street
+    "tie":         5,
+    # ─ Vehicles ───────────────────────────────────────────────────────────────
+    "bus":         8,
+    "truck":      12,   # Delivery OR fire/ambulance (same COCO class)
+    "boat":        10,
     "train":       6,
-    "airplane":    8,   # Low-flying / anomaly
-    # ─ Infrastructure anomalies — static objects; motion detection = noteworthy
-    "traffic light": 10,  # Downed/missing traffic light = accident scene
-    "stop sign":    12,   # Downed stop sign = traffic hazard
-    "fire hydrant": 15,   # Open or moved hydrant = fire response / water main
-    "parking meter": 5,
-    # ─ Outdoor food / objects (implies gathering, street fair, incident)
-    "bottle":      5,
-    "pizza":       8,
-    "cake":       10,   # Outdoor birthday / street party
-    "hot dog":     6,   # Street vendor / food stall
-    # ─ Furniture outdoors (eviction, flood, altercation)
-    "tv":         20,   # TV on the sidewalk = eviction / large item dump
-    "couch":      20,   # Couch on sidewalk = same
-    "chair":       6,   # Outdoor seating (gathering) or dumped item
-    # ─ Barnyard COCO noise in urban context — near-silent ─────────────────────
+    "airplane":   12,   # Atmospheric — low-flying aircraft is always notable
+    # ─ Wildlife ───────────────────────────────────────────────────────────────
+    "horse":       8,
+    "elephant":   50,   # Exotic outlier — immediate high-priority alert
+    "zebra":      50,
+    "giraffe":    50,
+    # ─ Barnyard COCO noise — near-silent ──────────────────────────────────────
     "sheep":       1,
     "cow":         1,
-    "horse":       1,
-    # ─ Critical ──────────────────────────────────────────────────────────────
+    # ─ Critical ───────────────────────────────────────────────────────────────
     "bear":      100,
 }
 
@@ -139,7 +122,7 @@ DELIVERY_CLASSES    = {"truck"}
 WILDLIFE_CLASSES    = ANIMAL_CLASSES
 
 # Classes silenced when appearing solo (too routine or urban COCO misclassification)
-SILENT_SOLO_CLASSES = {"car", "bicycle", "bird", "sheep", "cow", "horse", "bench", "parking meter"}
+SILENT_SOLO_CLASSES = {"car", "bicycle", "bird", "sheep", "cow", "horse"}
 
 
 
@@ -157,7 +140,7 @@ def translate_to_emoji_summary(detected_classes):
 
     # ── Composite scene heuristics (order matters — most specific first) ────
 
-    # Large crowd
+    # Large crowd (5+ = rally/incident; 2-4 = notable gathering)
     if counts.get("person", 0) >= 5:
         summary.append("🏟️")           # Rally, incident, street closure
         counts["person"] = 0
@@ -165,25 +148,37 @@ def translate_to_emoji_summary(detected_classes):
         summary.append("👥")
         counts["person"] = 0
 
+    # Exotic animal outlier (elephant/zebra/giraffe in urban context = immediate alert)
+    for exotic in ("elephant", "zebra", "giraffe"):
+        if counts.get(exotic, 0) > 0:
+            summary.append(f"{EMOJI_MAP[exotic]}🚨")
+            counts[exotic] = 0
+
+    # Animal cluster (3+ animals of any type = herd / pack anomaly)
+    total_animals = sum(counts.get(c, 0) for c in ANIMAL_CLASSES)
+    if total_animals >= 3:
+        summary.append("🐾🐾🐾")
+
+    # Atmospheric: airplane in frame (low-flying is notable)
+    if counts.get("airplane", 0) > 0:
+        summary.append("✈️⬇️")           # Low-flying aircraft
+        counts["airplane"] = 0
+
+    # Atmospheric: kite = clear-sky/wind event
+    if counts.get("kite", 0) > 0 and counts.get("person", 0) > 0:
+        summary.append("🪁🌬️")
+        counts["kite"] = 0
+
     # Cyclist (bicycle + person together = active rider, not abandoned bike)
     if counts.get("bicycle", 0) > 0 and counts.get("person", 0) > 0:
         summary.append("🚴")
         counts["bicycle"] = 0
         counts["person"] = max(0, counts.get("person", 0) - 1)
 
-    # Moving day (suitcase OR couch/tv outdoors + person)
-    moving_items = counts.get("suitcase", 0) + counts.get("couch", 0) + counts.get("tv", 0)
-    if moving_items > 0 and counts.get("person", 0) > 0:
-        summary.append("🚚📦")         # Moving in/out or eviction
+    # Moving day (person + suitcase)
+    if counts.get("suitcase", 0) > 0 and counts.get("person", 0) > 0:
+        summary.append("🚚📦")
         counts["suitcase"] = 0
-        counts["couch"] = 0
-        counts["tv"] = 0
-
-    # Street party / outdoor gathering (food items + people)
-    party_food = counts.get("pizza", 0) + counts.get("cake", 0) + counts.get("hot dog", 0) + counts.get("bottle", 0)
-    if party_food > 0 and counts.get("person", 0) > 0:
-        summary.append("🎉")           # Street party, gathering, food stall
-        counts["pizza"] = counts["cake"] = counts["hot dog"] = counts["bottle"] = 0
 
     # Loose dog (no person in scene)
     if counts.get("dog", 0) > 0 and counts.get("person", 0) == 0:
@@ -205,17 +200,6 @@ def translate_to_emoji_summary(detected_classes):
     if play_items > 0 and counts.get("person", 0) > 0:
         summary.append("🏃⚽")         # Active street/park play
         counts["sports ball"] = counts["frisbee"] = counts["kite"] = 0
-
-    # Infrastructure anomaly (stop sign / fire hydrant = potential incident)
-    if counts.get("stop sign", 0) > 0:
-        summary.append("🛑⚠️")         # Downed stop sign / road hazard
-        counts["stop sign"] = 0
-    if counts.get("fire hydrant", 0) > 0:
-        summary.append("🚒💧")         # Open/moved hydrant = fire response
-        counts["fire hydrant"] = 0
-    if counts.get("traffic light", 0) > 0:
-        summary.append("🚦⚠️")         # Downed/dark traffic light
-        counts["traffic light"] = 0
 
     # ── Fallthrough: render remaining classes as single symbols ─────────────
     for obj, count in counts.items():
@@ -279,11 +263,6 @@ def calculate_image_score(detected_classes, weather_bonus: int = 0):
 
     if counts.get("dog", 0) > 0 and counts.get("person", 0) == 0:
         score += 15   # Loose dog anomaly
-
-    # Furniture/appliances outdoors = eviction, flood, or large dump (high urgency)
-    outdoor_furniture = counts.get("tv", 0) + counts.get("couch", 0)
-    if outdoor_furniture > 0:
-        score += 25
 
     # Quiet hours bonus: any person detected 11PM–6AM is inherently more notable
     if is_quiet_hours() and counts.get("person", 0) > 0:
