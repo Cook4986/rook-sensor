@@ -29,11 +29,11 @@
 1. Download [Raspberry Pi Imager](https://www.raspberrypi.com/software/).
 2. Insert the SanDisk microSD into the Acer reader → plug into Mac.
 3. Choose OS → **Raspberry Pi OS Lite (64-bit)** (Trixie or Bookworm both work).
-4. Advanced settings (⚙️):
+4. Advanced settings (⚙️) — **Gotcha: You must configure the OS customization profile perfectly here to avoid headless boot failures!**
    - Hostname: `rook.local`
-   - SSH: ✅ password auth
+   - SSH: ✅ password auth (Gotcha: if you skip this, SSH will be permanently disabled and you must reflash)
    - User/Pass: `rook` / your password
-   - Wi-Fi: your SSID, country `US`
+   - Wi-Fi: your SSID, country `US` (Gotcha: SSID/password must match exactly. 5GHz networks can sometimes fail on initial boot; use 2.4GHz if possible).
    - Locale: America/New_York
 5. Write → wait for verification → eject.
 
@@ -122,7 +122,7 @@ dtoverlay=arducam-pivariety,cam1
 sudo reboot
 ```
 
-### Step 2: Install Arducam patched libcamera
+### Step 2: Install Arducam libcamera Software
 
 The B0444 Pivariety MCU requires Arducam's custom libcamera build:
 
@@ -132,9 +132,10 @@ wget -qO install_pivariety_pkgs.sh \
   https://github.com/ArduCAM/Arducam-Pivariety-V4L2-Driver/releases/download/install_script/install_pivariety_pkgs.sh
 chmod +x install_pivariety_pkgs.sh
 
-# Install patched libcamera (answer 'A' to overwrite, 'Y' to deps)
-./install_pivariety_pkgs.sh -p libcamera_dev
-./install_pivariety_pkgs.sh -p libcamera_apps
+# Note: On Raspberry Pi 5 with Trixie or Bookworm, the kernel overlay (arducam-pivariety) 
+# is baked in natively. DO NOT compile the kernel driver. Just install libcamera apps.
+sudo ./install_pivariety_pkgs.sh -p libcamera_dev
+sudo ./install_pivariety_pkgs.sh -p libcamera_apps
 ```
 
 ### Step 3: Validate
@@ -161,7 +162,8 @@ scp rook@rook.local:~/test.jpg ~/Desktop/rook_first_light.jpg
 
 ```bash
 # System deps
-sudo apt install -y python3-pip python3-venv python3-picamera2 libatlas-base-dev libopenjp2-7 libtiff6
+# Gotcha: libatlas-base-dev is unavailable in Trixie. Use libopenblas-dev.
+sudo apt install -y python3-pip python3-venv python3-picamera2 libopenblas-dev libopenjp2-7 libtiff6
 
 # Virtual environment (--system-site-packages needed for libcamera/picamera2 access)
 python3 -m venv --system-site-packages ~/rook-env
@@ -181,12 +183,17 @@ pip install --force-reinstall numpy
 curl -fsSL https://tailscale.com/install.sh | sh
 sudo tailscale up   # Follow the auth URL
 
-# Twilio credentials
+# Twilio & Email credentials
 cat > ~/rook-env/.env << 'EOF'
-TWILIO_ACCOUNT_SID=your_sid_here
-TWILIO_AUTH_TOKEN=your_token_here
-TWILIO_FROM_NUMBER=+1XXXXXXXXXX
-NOTIFY_TO_NUMBER=+1XXXXXXXXXX
+SLACK_WEBHOOK_URL=https://hooks.slack.com/services/...
+SMTP_SERVER=smtp.gmail.com
+SMTP_PORT=587
+SMTP_USER=your.email@gmail.com
+SMTP_PASS=your_16_char_app_password
+NOTIFY_EMAIL=your.email@gmail.com
+LATITUDE=40.7128
+LONGITUDE=-74.0060
+FLIP_180=1
 EOF
 ```
 

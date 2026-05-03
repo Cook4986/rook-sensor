@@ -30,24 +30,32 @@ sudo systemctl start watchdog
 
 # ── Phase 4: Arducam Driver ───────────────────────────────
 echo ""
-echo "▶ [Phase 4] Installing Arducam Pivariety driver..."
+echo "▶ [Phase 4] Installing Arducam Pivariety libcamera patches..."
+# Gotcha: Kernel driver compilation is NO LONGER NEEDED for Pi 5 on Trixie/Bookworm.
+# The arducam-pivariety overlay is native. We only patch libcamera.
 wget -qO install_pivariety_pkgs.sh \
     https://github.com/ArduCAM/Arducam-Pivariety-V4L2-Driver/releases/download/install_script/install_pivariety_pkgs.sh
 chmod +x install_pivariety_pkgs.sh
-./install_pivariety_pkgs.sh -p kernel_driver
+# Note: sudo is required, and will prompt for the pi user password.
+sudo ./install_pivariety_pkgs.sh -p libcamera_dev
+sudo ./install_pivariety_pkgs.sh -p libcamera_apps
 
 # ── Phase 5: Python Stack ─────────────────────────────────
 echo ""
 echo "▶ [Phase 5] Installing system dependencies..."
-sudo apt install -y python3-pip python3-venv libatlas-base-dev libopenjp2-7 libtiff6
+# Gotcha: libatlas-base-dev is unavailable in Trixie. Use libopenblas-dev.
+sudo apt install -y python3-pip python3-venv python3-picamera2 libopenblas-dev libopenjp2-7 libtiff6
 
 echo "▶ [Phase 5] Creating Python virtual environment..."
-python3 -m venv ~/rook-env
+# Gotcha: Must use --system-site-packages for picamera2 bindings
+python3 -m venv --system-site-packages ~/rook-env
 source ~/rook-env/bin/activate
 
 echo "▶ [Phase 5] Installing Python packages..."
 pip install --upgrade pip
-pip install ultralytics opencv-python-headless picamera2 twilio httpx python-dotenv
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+pip install ultralytics opencv-python-headless twilio httpx python-dotenv suntime
+pip install --force-reinstall numpy
 
 # ── Phase 5C: Tailscale ───────────────────────────────────
 echo ""

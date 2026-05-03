@@ -42,6 +42,12 @@ def is_daytime():
     try:
         sr = sun.get_sunrise_time()
         ss = sun.get_sunset_time()
+        
+        # FIX: suntime bug where sunset can return a time from yesterday
+        # due to timezone offset crossings. If sunset is before sunrise, push it ahead 1 day.
+        if ss < sr:
+            ss += datetime.timedelta(days=1)
+            
         return sr < now < ss
     except Exception:
         # Fallback to simple time check if sun math fails (e.g. polar regions)

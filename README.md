@@ -151,6 +151,7 @@ camera_auto_detect=0
 dtoverlay=arducam-pivariety,cam1
 
 # Install Arducam patched libcamera:
+# (Note: Kernel driver compilation is NO LONGER NEEDED on Pi 5. The overlay is native.)
 ./install_pivariety_pkgs.sh -p libcamera_dev
 ./install_pivariety_pkgs.sh -p libcamera_apps
 ```
@@ -290,6 +291,8 @@ rook-sensor/
 |-------|------------|
 | B0444 not detected on CAM/DISP 0 | Use **CAM/DISP 1** — Pivariety MCU only works on `cam1` |
 | `dtoverlay=imx462` fails | B0444 is Pivariety. Use `dtoverlay=arducam-pivariety,cam1` |
+| Arducam kernel compile fails on Trixie | Kernel driver compile (`-p kernel_driver`) is **no longer required** on Pi 5. The overlay is native. Just install `libcamera_dev` and `libcamera_apps`. |
+| Apt fails on `libatlas-base-dev` | Package is unavailable in Trixie. Use `libopenblas-dev` instead. |
 | Solid red LED after thermal spike | Pi has shut down (80°C cutoff triggered). Power cycle to recover. Systemd restarts engine automatically after boot. |
 | YOLO inference ~850ms (not ~80ms) | Expected on CPU-only Pi 5. Adequate for motion-gated architecture. Upgrade: Hailo-8L HAT+. |
 | OOM crash during ONNX export | 2 GB RAM too tight for ONNX session optimization. Use PyTorch `.pt` model. |

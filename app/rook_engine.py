@@ -564,7 +564,13 @@ def main():
                 detected_classes = [results[0].names[int(c)] for c in results[0].boxes.cls]
 
                 if not detected_classes:
-                    logging.info("   Ghost motion (no objects found). Ignored.")
+                    logging.info("   Ghost motion (unclassified object). Archiving frame for future training.")
+                    # Export classless object motion to a dedicated archive
+                    archive_dir = os.path.expanduser("~/rook-archive/unclassified")
+                    os.makedirs(archive_dir, exist_ok=True)
+                    ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+                    # Save the raw frame (BGR) that triggered motion but failed COCO classification
+                    cv2.imwrite(os.path.join(archive_dir, f"unclassified_{ts}.jpg"), frame)
                     time.sleep(0.1)
                     continue
 
