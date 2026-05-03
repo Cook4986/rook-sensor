@@ -51,161 +51,194 @@ logging.basicConfig(
 )
 
 # ── COCO Class → Emoji ────────────────────────────────────────────────────────
-# Full coverage for animate subjects, activities, vehicles, and weather accessories.
-# Inanimate infrastructure (stop signs, hydrants, benches) intentionally excluded —
-# they are static background that YOLO classifies incidentally after MOG2 fires.
 EMOJI_MAP = {
     # People & personal items
     "person": "🚶", "backpack": "🎒", "umbrella": "☂️", "suitcase": "🧳",
     "cell phone": "📱", "handbag": "👜", "tie": "👔",
-    # Recreational / activity signals
+    # Recreational
     "skateboard": "🛹", "sports ball": "⚽", "frisbee": "🥏", "kite": "🪁",
     "skis": "⛷️", "snowboard": "🏂", "surfboard": "🏄", "tennis racket": "🎾",
     "baseball bat": "⚾", "baseball glove": "🧤",
-    # Vehicles (animate — move through scene)
+    # Vehicles
     "bicycle": "🚲", "car": "🚗", "motorcycle": "🏍️",
     "bus": "🚌", "truck": "🚚", "train": "🚂", "boat": "⛵", "airplane": "✈️",
-    # Wildlife
-    "dog": "🐕", "cat": "🐈", "bird": "🦅", "bear": "🐻",
-    "horse": "🐎", "sheep": "🐑", "cow": "🐄",
-    "elephant": "🐘", "zebra": "🦓", "giraffe": "🦒",
+    # Wildlife (relevant urban/suburban)
+    "dog": "🐕", "cat": "🐈", "bird": "🦅", "bear": "🐻", "horse": "🐎",
 }
 
 
 # Score = how notable is this for an urban street scene?
-# Animate subjects only: people, activities, wildlife, vehicles, atmospheric phenomena.
 SCORE_MAP = {
-    # ─ Background / silent solo ───────────────────────────────────────────────────
+    # ─ Background / silent solo ───────────────────────────────────────────────
     "car":         1,
     "bicycle":     1,
-    "bird":        2,
+    "bird":        3,   # Elevated — large raptors score higher via heuristic
     "cell phone":  2,
-    # ─ Routine pedestrian activity ────────────────────────────────────────────
+    # ─ Pedestrian activity ────────────────────────────────────────────────────
     "person":      2,
     "dog":         4,
     "cat":         4,
     "backpack":    3,
-    "umbrella":    5,   # Weather signal (active rain event)
+    "umbrella":    5,
     "skateboard":  4,
     "motorcycle":  5,
-    # ─ Recreational / activity signals ────────────────────────────────────────
+    # ─ Recreational ───────────────────────────────────────────────────────────
     "sports ball": 5,
     "frisbee":     5,
-    "kite":        8,   # Atmospheric: visible only in clear/windy outdoor conditions
+    "kite":        8,
     "tennis racket": 5,
     "baseball bat": 8,
-    "skis":        12,  # Rare in NYC — weather or major novelty event
+    "skis":        12,
     "snowboard":   12,
     "surfboard":   10,
-    "suitcase":    8,   # Someone moving in/out
+    "suitcase":    8,
     "handbag":     4,
     "tie":         5,
     # ─ Vehicles ───────────────────────────────────────────────────────────────
     "bus":         8,
-    "truck":      12,   # Delivery OR fire/ambulance (same COCO class)
+    "truck":      12,
     "boat":        10,
     "train":       6,
-    "airplane":   12,   # Atmospheric — low-flying aircraft is always notable
+    "airplane":   12,
     # ─ Wildlife ───────────────────────────────────────────────────────────────
     "horse":       8,
-    "elephant":   50,   # Exotic outlier — immediate high-priority alert
-    "zebra":      50,
-    "giraffe":    50,
-    # ─ Barnyard COCO noise — near-silent ──────────────────────────────────────
-    "sheep":       1,
-    "cow":         1,
     # ─ Critical ───────────────────────────────────────────────────────────────
     "bear":      100,
 }
 
 # ── Daily Stats Category Membership ──────────────────────────────────────────
-TRAFFIC_CLASSES     = {"car", "truck", "bus", "motorcycle", "bicycle", "train", "boat"}
-PEDESTRIAN_CLASSES  = {"person"}
-ANIMAL_CLASSES      = {"bird", "dog", "cat", "bear", "horse", "elephant", "zebra", "giraffe"}
-DELIVERY_CLASSES    = {"truck"}
-WILDLIFE_CLASSES    = ANIMAL_CLASSES
+TRAFFIC_CLASSES    = {"car", "truck", "bus", "motorcycle", "bicycle", "train", "boat"}
+PEDESTRIAN_CLASSES = {"person"}
+ANIMAL_CLASSES     = {"bird", "dog", "cat", "bear", "horse"}
+DELIVERY_CLASSES   = {"truck"}
+WILDLIFE_CLASSES   = ANIMAL_CLASSES
 
-# Classes silenced when appearing solo (too routine or urban COCO misclassification)
-SILENT_SOLO_CLASSES = {"car", "bicycle", "bird", "sheep", "cow", "horse"}
+# Classes silenced when appearing solo (background noise)
+SILENT_SOLO_CLASSES = {"car", "bicycle", "horse"}
+
+
+# ── Color-sensitive bird classification ───────────────────────────────────────
+def classify_bird_by_color(frame_bgr, box):
+    """
+    Attempts songbird color ID from bounding box HSV analysis.
+    Returns an emoji hint or None. Fires only when bird bbox is large enough
+    to be meaningful (>400px²) — avoids misclassifying distant specks.
+    """
+    try:
+        x1, y1, x2, y2 = [int(v) for v in box.xyxy[0]]
+        if (x2 - x1) * (y2 - y1) < 400:
+            return None
+        crop = frame_bgr[y1:y2, x1:x2]
+        if crop.size == 0:
+            return None
+        hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+        total = crop.shape[0] * crop.shape[1] + 1
+        # Cardinal: red hue (H 0-10 or 170-180 in OpenCV 0-180 scale)
+        red = (cv2.countNonZero(cv2.inRange(hsv, (0, 80, 80), (10, 255, 255))) +
+               cv2.countNonZero(cv2.inRange(hsv, (170, 80, 80), (180, 255, 255)))) / total
+        # Bluebird / Blue Jay: blue hue (H 100-130)
+        blue = cv2.countNonZero(cv2.inRange(hsv, (100, 60, 60), (130, 255, 255))) / total
+        if red > 0.15:
+            return "🔴🐦"   # Possible cardinal
+        if blue > 0.15:
+            return "🔵🐦"   # Possible bluebird / blue jay
+    except Exception:
+        pass
+    return None
 
 
 
 
 # ── Translation Heuristics ────────────────────────────────────────────────────
-def translate_to_emoji_summary(detected_classes):
+def translate_to_emoji_summary(detected_classes, motion_pixels=0, frame_bgr=None, boxes=None):
     """
-    Converts raw YOLO class list to compact, expressive emoji string.
-    Composite heuristics fire first to capture scene context; remainder
-    falls through to single-symbol rendering.
+    Converts YOLO detections to compact emoji string.
+    Accepts optional motion_pixels (for runner heuristic) and frame_bgr + boxes
+    (for color-sensitive bird classification).
     """
     summary = []
     counts = {c: detected_classes.count(c) for c in set(detected_classes)}
     night = not is_daytime()
+    quiet = is_quiet_hours()
 
-    # ── Composite scene heuristics (order matters — most specific first) ────
-
-    # Large crowd (5+ = rally/incident; 2-4 = notable gathering)
+    # Large crowd
     if counts.get("person", 0) >= 5:
-        summary.append("🏟️")           # Rally, incident, street closure
+        summary.append("🏟️")   # Rally / incident
         counts["person"] = 0
     elif counts.get("person", 0) >= 2:
         summary.append("👥")
         counts["person"] = 0
 
-    # Exotic animal outlier (elephant/zebra/giraffe in urban context = immediate alert)
-    for exotic in ("elephant", "zebra", "giraffe"):
-        if counts.get(exotic, 0) > 0:
-            summary.append(f"{EMOJI_MAP[exotic]}🚨")
-            counts[exotic] = 0
-
-    # Animal cluster (3+ animals of any type = herd / pack anomaly)
-    total_animals = sum(counts.get(c, 0) for c in ANIMAL_CLASSES)
-    if total_animals >= 3:
+    # Animal cluster (3+ = pack / flock anomaly)
+    if sum(counts.get(c, 0) for c in ANIMAL_CLASSES) >= 3:
         summary.append("🐾🐾🐾")
 
-    # Atmospheric: airplane in frame (low-flying is notable)
+    # Atmospheric: low-flying aircraft
     if counts.get("airplane", 0) > 0:
-        summary.append("✈️⬇️")           # Low-flying aircraft
+        summary.append("✈️⬇️")
         counts["airplane"] = 0
 
-    # Atmospheric: kite = clear-sky/wind event
+    # Atmospheric: kite + person = active wind event
     if counts.get("kite", 0) > 0 and counts.get("person", 0) > 0:
         summary.append("🪁🌬️")
         counts["kite"] = 0
 
-    # Cyclist (bicycle + person together = active rider, not abandoned bike)
+    # Runner: solo person + large motion blob (fast-moving subject)
+    if counts.get("person", 0) == 1 and motion_pixels > 4000:
+        summary.append("🏃")
+        counts["person"] = 0
+
+    # Cyclist
     if counts.get("bicycle", 0) > 0 and counts.get("person", 0) > 0:
         summary.append("🚴")
         counts["bicycle"] = 0
-        counts["person"] = max(0, counts.get("person", 0) - 1)
+        counts["person"] = max(0, counts["person"] - 1)
 
-    # Moving day (person + suitcase)
+    # Moving day
     if counts.get("suitcase", 0) > 0 and counts.get("person", 0) > 0:
         summary.append("🚚📦")
         counts["suitcase"] = 0
 
-    # Loose dog (no person in scene)
+    # Coyote heuristic: solo dog at night/dawn with no person
+    # COCO has no coyote class — lone dog at quiet hours is the best available signal
     if counts.get("dog", 0) > 0 and counts.get("person", 0) == 0:
-        summary.append("🐕⚠️")
+        if quiet or datetime.now().hour in (5, 6, 7):
+            summary.append("🐺⚠️")   # Possible coyote
+        else:
+            summary.append("🐕⚠️")   # Loose dog
         counts["dog"] = 0
 
-    # Night walker (person detected during quiet hours)
+    # Raptor heuristic: bird detected without people (solo, potentially large)
+    if counts.get("bird", 0) > 0 and counts.get("person", 0) == 0:
+        # Try color ID on bounding box if frame data available
+        bird_emoji = "🦅"   # Default: assume raptor (eagle/hawk) when solo
+        if frame_bgr is not None and boxes is not None:
+            for i, cls_id in enumerate(boxes.cls):
+                if boxes.conf[i] > 0.35:  # Only high-confidence birds
+                    hint = classify_bird_by_color(frame_bgr, boxes[i])
+                    if hint:
+                        bird_emoji = hint
+                        break
+        summary.append(bird_emoji)
+        counts["bird"] = 0
+
+    # Night walker
     if night and counts.get("person", 0) > 0:
         summary.append("🌙🚶")
         counts["person"] = 0
 
-    # Umbrella in use (umbrella + person = rain/weather event)
+    # Rain event: umbrella + person
     if counts.get("umbrella", 0) > 0 and counts.get("person", 0) > 0:
-        summary.append("🌂🚶")         # Active rain event
+        summary.append("🌂🚶")
         counts["umbrella"] = 0
 
-    # Street sports (ball/frisbee/kite + person)
-    play_items = counts.get("sports ball", 0) + counts.get("frisbee", 0) + counts.get("kite", 0)
-    if play_items > 0 and counts.get("person", 0) > 0:
-        summary.append("🏃⚽")         # Active street/park play
-        counts["sports ball"] = counts["frisbee"] = counts["kite"] = 0
+    # Street play: ball/frisbee + person
+    play = counts.get("sports ball", 0) + counts.get("frisbee", 0)
+    if play > 0 and counts.get("person", 0) > 0:
+        summary.append("🏃⚽")
+        counts["sports ball"] = counts["frisbee"] = 0
 
-    # ── Fallthrough: render remaining classes as single symbols ─────────────
+    # Fallthrough: remaining classes as single symbols
     for obj, count in counts.items():
         if count > 0:
             emoji = EMOJI_MAP.get(obj, f"[{obj}]")
@@ -287,14 +320,23 @@ def get_temp():
         return 0.0
 
 
-# ── Camera Exposure ───────────────────────────────────────────────────────────
+# ── Camera Exposure — fires Slack on day/night transition (sunrise/sunset) ──
+_last_daytime_state = None  # tracks previous state to detect transitions
+
 def configure_camera_exposure(cam):
-    if is_daytime():
+    global _last_daytime_state
+    day = is_daytime()
+    if day:
         cam.set_controls({"ExposureValue": 0.0, "FrameDurationLimits": (33333, 33333)})
         logging.info("☀️  Camera locked to Daytime Exposure")
     else:
         cam.set_controls({"ExposureValue": 1.0, "FrameDurationLimits": (33333, 100000)})
         logging.info("🌙 Camera locked to Nighttime Exposure")
+    # Fire Slack only on actual transition (not every 10-min poll)
+    if _last_daytime_state is not None and day != _last_daytime_state:
+        msg = "🌅 Sunrise — Rook switching to daytime mode." if day else "🌆 Sunset — Rook switching to nighttime mode."
+        threading.Thread(target=send_slack_alert, args=(msg,), daemon=True).start()
+    _last_daytime_state = day
 
 
 # ── Beast Cam: Cache wildlife crops for batch species ID ──────────────────────
@@ -324,12 +366,8 @@ def save_beast_cam_crop(frame_rgb, boxes, classes, names, today_dir):
 # ── Daily Digest ──────────────────────────────────────────────────────────────
 def send_daily_digest(notify_email, best_image_data, daily_stats, beast_cam_today_dir):
     """
-    Sends a structured daily digest at 6 PM with:
-    - Activity summary totals (Traffic, Pedestrians, Animals, Deliveries)
-    - Top detected event of the day (image attached)
-    - Beast Cam section (all wildlife crops from today)
-    - System health (temp, uptime)
-    - Raw log as inline text
+    Sends overnight digest at DIGEST_HOUR (3 AM) with activity summary,
+    top event image, Beast Cam wildlife crops, and system health.
     """
     try:
         smtp_server = os.environ.get("SMTP_SERVER")
@@ -437,9 +475,17 @@ def send_daily_digest(notify_email, best_image_data, daily_stats, beast_cam_toda
             shutil.rmtree(beast_cam_today_dir, ignore_errors=True)
             logging.info(f"🗑️  Beast Cam cache cleared: {beast_cam_today_dir}")
 
-        # Reset log
-        with open(LOG_FILE, "w") as f:
-            f.write(f"--- Rook Log Reset ({datetime.now().strftime('%Y-%m-%d %H:%M:%S')}) ---\n")
+        # Reset log (use truncate to avoid conflicting with RotatingFileHandler)
+        try:
+            for h in logging.getLogger().handlers:
+                if hasattr(h, 'stream') and hasattr(h.stream, 'truncate'):
+                    h.stream.seek(0)
+                    h.stream.truncate()
+                    h.stream.write(f"--- Rook Log Reset ({datetime.now().strftime('%Y-%m-%d %H:%M:%S')}) ---\n")
+                    h.stream.flush()
+                    break
+        except Exception:
+            pass
 
     except Exception as e:
         logging.error(f"❌ Failed to send daily digest: {e}")
@@ -771,7 +817,12 @@ def main():
                     ).start()
 
                 # ── Build alert string ─────────────────────────────────────
-                emojis = translate_to_emoji_summary(detected_classes)
+                emojis = translate_to_emoji_summary(
+                    detected_classes,
+                    motion_pixels=motion_pixels,
+                    frame_bgr=frame,
+                    boxes=results[0].boxes
+                )
 
                 # Append notable weather condition
                 weather_emoji = enrichment.get_weather_emoji()
