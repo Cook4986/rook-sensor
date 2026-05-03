@@ -694,6 +694,8 @@ def main():
 
             # ── YOLO inference (always runs on motion) ─────────────────────
             if motion_pixels > MOTION_THRESHOLD_PIXELS and largest_blob > MOTION_BLOB_MIN_PIXELS:
+                # Convert BGR→RGB only when YOLO actually fires (deferred to save CPU on quiet frames)
+                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 results = model(frame_rgb, imgsz=1088, conf=0.30, verbose=False)
                 detected_classes = [results[0].names[int(c)] for c in results[0].boxes.cls]
 
