@@ -24,7 +24,7 @@ MOTION_BLOB_MIN_PIXELS = 80     # Min contiguous blob after dilation — ~9x9px 
 COOLDOWN_SECONDS = 60           # Minimum seconds between ALERTS (not between inference)
 QUIET_HOURS_START = 23          # 11 PM
 QUIET_HOURS_END = 6             # 6 AM
-MIN_EMAIL_SCORE = 20            # Score threshold for real-time email/MMS — unusual wildlife, rare events
+MIN_EMAIL_SCORE = 30            # Score threshold for real-time email/MMS — rare/notable events only (Slack gets more)
 MIN_SLACK_SCORE = 8             # Score threshold for Slack — solo car (score=6) silenced; dog walker+ fires
 THERMAL_CHECK_INTERVAL = 30     # Seconds between SoC temp reads (not per-frame)
 THERMAL_SOFT_LIMIT = 65.0       # °C: skip 2/3 frames to reduce CPU load
@@ -61,7 +61,7 @@ EMOJI_MAP = {
     "baseball bat": "⚾", "baseball glove": "🧤",
     # Vehicles
     "bicycle": "🚲", "car": "🚗", "motorcycle": "🏍️",
-    "bus": "🚌", "truck": "🚚", "train": "🚂", "boat": "⛵", "airplane": "✈️",
+    "bus": "🚌", "truck": "🚚", "boat": "⛵", "airplane": "✈️",
     # Wildlife (relevant urban/suburban)
     "dog": "🐕", "cat": "🐈", "bird": "🦅", "bear": "🐻", "horse": "🐎",
 }
@@ -97,7 +97,6 @@ SCORE_MAP = {
     "bus":         8,
     "truck":      12,
     "boat":        10,
-    "train":       6,
     "airplane":   12,
     # ─ Wildlife ───────────────────────────────────────────────────────────────
     "bird":       10,   # Airborne activity scores high, but gated by strict confidence interval
@@ -107,7 +106,38 @@ SCORE_MAP = {
 }
 
 # ── Daily Stats Category Membership ──────────────────────────────────────────
-TRAFFIC_CLASSES    = {"car", "truck", "bus", "motorcycle", "bicycle", "train", "boat"}
+TRAFFIC_CLASSES    = {"car", "truck", "bus", "motorcycle", "bicycle"}
+
+# Classes fully suppressed from detection — not present in this scene and cause misclassification noise.
+# "train"        🚂  No rail infrastructure nearby — boxy dark vehicle misclassification.
+# "traffic light" 🚦  Park houselight persistently misclassified as traffic light.
+# "boat"         ⛵  No navigable water nearby — park fence/reflective surface misclassification (observed live).
+IGNORED_CLASSES    = {"train", "traffic light", "boat"}
+
+# ── Lingerer Detection Thresholds ─────────────────────────────────────────────
+# How long an object must occupy the same scene zone before a lingering alert fires.
+# Designed to catch parked cars and loitering individuals without spamming.
+LINGER_THRESHOLDS = {
+    "car":        3600,  # 1 hour  — parked vehicle
+    # "truck" intentionally omitted — trash/delivery trucks operate on a 2-5 min cycle,
+    # well below any useful lingering threshold. Add to custom training plan for proper detection.
+    "motorcycle": 1800,  # 30 min  — parked bike
+    "bicycle":    1800,  # 30 min  — unattended bicycle
+    "person":      300,  # 5 min   — loitering individual
+}
+LINGER_ZONE_GRID  = 4    # NxN grid cells for zone comparison (coarser = more tolerant of drift)
+LINGER_COOLDOWN   = 900  # Re-alert at most every 15 min per lingering object (prevents spam)
+FORCED_YOLO_INTERVAL = 300  # Seconds between forced YOLO runs bypassing MOG2 gate (catches absorbed objects)
+
+# Per-class emoji shown when a lingering threshold fires.
+# Truck detected early morning at the curb → almost certainly a trash truck.
+LINGER_EMOJI = {
+    "car":        "🚗🔒",   # Parked car
+    # truck omitted — see LINGER_THRESHOLDS note
+    "motorcycle": "🏍️🔒",  # Parked motorcycle
+    "bicycle":    "🚲🔒",   # Unattended bicycle
+    "person":     "🚶⏱️",   # Loitering individual / group
+}
 PEDESTRIAN_CLASSES = {"person"}
 ANIMAL_CLASSES     = {"bird", "dog", "cat", "bear", "horse"}
 DELIVERY_CLASSES   = {"truck"}
@@ -115,6 +145,182 @@ WILDLIFE_CLASSES   = ANIMAL_CLASSES
 
 # Classes silenced when appearing solo (background noise)
 SILENT_SOLO_CLASSES = {"car", "bicycle", "horse"}
+
+
+# ── Scene Fixture Filter ──────────────────────────────────────────────────────
+class SceneFixtureFilter:
+    """
+    Auto-learns permanently static objects from YOLO detections.
+
+    Problem: A bright houselight across the park, a fixed signpost, or a parked
+    object that hasn't moved in days will appear in every inference pass — consuming
+    alert budget and polluting stats. YOLO has no concept of "this has always been here."
+
+    Mechanism:
+    - Maintains a rolling hit-rate per (class, zone) tuple over the last N inferences.
+    - Zone is derived from the bbox centroid mapped to a coarse LINGER_ZONE_GRID×LINGER_ZONE_GRID grid.
+    - If a (class, zone) combo appears in ≥ FIXTURE_HIT_RATE of the last FIXTURE_WINDOW
+      inferences, it is declared a FIXTURE and silently dropped from detected_classes.
+    - Fixtures are logged once on promotion and re-evaluated daily.
+
+    Zero inference cost: pure Python dict ops, negligible CPU.
+    """
+    FIXTURE_WINDOW   = 60    # Rolling window of inference results
+    FIXTURE_HIT_RATE = 0.80  # 80% presence = fixture
+
+    def __init__(self):
+        from collections import deque
+        self._history = deque(maxlen=self.FIXTURE_WINDOW)  # Each entry: set of (class, zone) present
+        self._fixtures: set = set()  # Confirmed static fixtures
+        self._logged: set  = set()   # Prevents repeated fixture log spam
+
+    def _zone(self, cx_norm: float, cy_norm: float) -> tuple:
+        """Map a normalized centroid (0–1) to a coarse grid cell."""
+        gx = min(int(cx_norm * LINGER_ZONE_GRID), LINGER_ZONE_GRID - 1)
+        gy = min(int(cy_norm * LINGER_ZONE_GRID), LINGER_ZONE_GRID - 1)
+        return (gx, gy)
+
+    def update(self, boxes, names, frame_w: int, frame_h: int):
+        """Feed the latest YOLO boxes into the rolling history and recompute fixtures."""
+        present = set()
+        for i, cls_id in enumerate(boxes.cls):
+            cls_name = names[int(cls_id)]
+            if cls_name in IGNORED_CLASSES:
+                continue
+            x1, y1, x2, y2 = boxes.xyxy[i].tolist()
+            cx = ((x1 + x2) / 2) / max(frame_w, 1)
+            cy = ((y1 + y2) / 2) / max(frame_h, 1)
+            present.add((cls_name, self._zone(cx, cy)))
+        self._history.append(present)
+
+        # Only compute fixture promotions after the window is populated
+        if len(self._history) < self.FIXTURE_WINDOW:
+            return
+
+        # Count hits across the window
+        counts = {}
+        for snapshot in self._history:
+            for key in snapshot:
+                counts[key] = counts.get(key, 0) + 1
+
+        new_fixtures = set()
+        for key, hits in counts.items():
+            if hits / self.FIXTURE_WINDOW >= self.FIXTURE_HIT_RATE:
+                new_fixtures.add(key)
+                if key not in self._logged:
+                    cls_name, zone = key
+                    logging.info(f"   📌 Fixture detected: '{cls_name}' at zone {zone} "
+                                 f"({hits}/{self.FIXTURE_WINDOW} inferences). Suppressing permanently.")
+                    self._logged.add(key)
+        self._fixtures = new_fixtures
+
+    def filter(self, detected_classes: list, boxes, names, frame_w: int, frame_h: int) -> list:
+        """
+        Remove any detected class whose (class, zone) is a confirmed fixture.
+        Returns the cleaned list.
+        """
+        if not self._fixtures:
+            return detected_classes
+        cleaned = []
+        for i, cls_id in enumerate(boxes.cls):
+            cls_name = names[int(cls_id)]
+            if cls_name not in detected_classes:
+                continue
+            x1, y1, x2, y2 = boxes.xyxy[i].tolist()
+            cx = ((x1 + x2) / 2) / max(frame_w, 1)
+            cy = ((y1 + y2) / 2) / max(frame_h, 1)
+            key = (cls_name, self._zone(cx, cy))
+            if key in self._fixtures:
+                logging.debug(f"   📌 Fixture suppressed: {cls_name} @ zone {key[1]}")
+            else:
+                cleaned.append(cls_name)
+        # Preserve any classes not in boxes (shouldn't happen, but safety net)
+        return cleaned if cleaned else [c for c in detected_classes
+                                        if not any(c == k[0] for k in self._fixtures)]
+
+    def reset(self):
+        """Called at daily rollover — gives fixtures a chance to de-promote if scene changes."""
+        self._history.clear()
+        self._fixtures.clear()
+        self._logged.clear()
+        logging.info("   📌 Fixture filter reset for new day.")
+
+
+# ── Lingerer Tracker ──────────────────────────────────────────────────────────
+class LingererTracker:
+    """
+    Detects objects that have been continuously present in the same scene zone
+    beyond their class-specific threshold, then fires a single delayed alert.
+
+    Problem: MOG2 absorbs a stationary car or loitering person into the background
+    model after ~30s — they stop triggering motion detection and vanish silently.
+    The periodic forced-YOLO timer (FORCED_YOLO_INTERVAL) re-injects the scene
+    regardless of motion so this tracker can observe still objects.
+
+    Algorithm:
+    - On each YOLO inference, map each detected (class, zone) to a first-seen timestamp.
+    - If still present and elapsed ≥ LINGER_THRESHOLDS[class] → fire lingering alert (once).
+    - Re-alert after LINGER_COOLDOWN if still present.
+    - On disappearance, evict the entry.
+    """
+    def __init__(self):
+        # key: (class_name, zone) → {"first_seen": float, "last_alerted": float}
+        self._tracked: dict = {}
+
+    def _zone(self, cx_norm: float, cy_norm: float) -> tuple:
+        gx = min(int(cx_norm * LINGER_ZONE_GRID), LINGER_ZONE_GRID - 1)
+        gy = min(int(cy_norm * LINGER_ZONE_GRID), LINGER_ZONE_GRID - 1)
+        return (gx, gy)
+
+    def update(self, detected_classes: list, boxes, names,
+               frame_w: int, frame_h: int) -> list:
+        """
+        Called after fixture filtering. Returns a list of lingering-alert emoji strings
+        to be dispatched. Empty if nothing has crossed its threshold.
+        """
+        now = time.time()
+        current_keys = set()
+
+        for i, cls_id in enumerate(boxes.cls):
+            cls_name = names[int(cls_id)]
+            if cls_name not in detected_classes:
+                continue  # Was fixture-filtered out
+            if cls_name not in LINGER_THRESHOLDS:
+                continue  # Not a tracked class
+
+            x1, y1, x2, y2 = boxes.xyxy[i].tolist()
+            cx = ((x1 + x2) / 2) / max(frame_w, 1)
+            cy = ((y1 + y2) / 2) / max(frame_h, 1)
+            key = (cls_name, self._zone(cx, cy))
+            current_keys.add(key)
+
+            if key not in self._tracked:
+                self._tracked[key] = {"first_seen": now, "last_alerted": 0}
+
+        # Evict keys no longer present
+        gone = set(self._tracked.keys()) - current_keys
+        for key in gone:
+            logging.debug(f"   ⏱️  Lingerer cleared: {key[0]} left zone {key[1]}")
+            del self._tracked[key]
+
+        # Check thresholds and build alerts
+        alerts = []
+        for key, state in self._tracked.items():
+            cls_name, zone = key
+            threshold = LINGER_THRESHOLDS[cls_name]
+            elapsed = now - state["first_seen"]
+            since_alert = now - state["last_alerted"]
+
+            if elapsed >= threshold and since_alert >= LINGER_COOLDOWN:
+                mins = int(elapsed // 60)
+                # Use LINGER_EMOJI for contextual loitering symbols (e.g. 🗑️🚚 for truck at curb)
+                linger_sym = LINGER_EMOJI.get(cls_name, EMOJI_MAP.get(cls_name, f"[{cls_name}]"))
+                alert = f"{linger_sym} {cls_name.capitalize()} lingering {mins}min"
+                alerts.append(alert)
+                state["last_alerted"] = now
+                logging.info(f"   ⏱️  Lingering alert: {alert}")
+
+        return alerts
 
 
 # ── Color-sensitive bird classification ───────────────────────────────────────
@@ -364,11 +570,19 @@ def save_beast_cam_crop(frame_rgb, boxes, classes, names, today_dir):
 
 
 # ── Daily Digest ──────────────────────────────────────────────────────────────
-def send_daily_digest(notify_email, best_image_data, daily_stats, beast_cam_today_dir):
+def send_daily_digest(notify_email, best_image_data, daily_stats, beast_cam_today_dir,
+                      report_date_label: str = "", emoji_log: list = None):
     """
-    Sends overnight digest at DIGEST_HOUR (3 AM) with activity summary,
-    top event image, Beast Cam wildlife crops, and system health.
+    Sends overnight digest at DIGEST_HOUR (3 AM) covering the *previous* calendar
+    day's activity — not the current day (which would only represent ~3 hours of data).
+    Includes:
+      • Activity summary counts (traffic, pedestrians, animals, deliveries)
+      • Emoji activity stack — every notable event in chronological order
+      • Top event image attachment
+      • Beast Cam wildlife crops
+    Raw log is NOT included to keep the digest clean and scannable.
     """
+    emoji_log = emoji_log or []
     try:
         smtp_server = os.environ.get("SMTP_SERVER")
         smtp_port = int(os.environ.get("SMTP_PORT", 587))
@@ -379,12 +593,13 @@ def send_daily_digest(notify_email, best_image_data, daily_stats, beast_cam_toda
             logging.error("Missing SMTP credentials for daily digest.")
             return
 
-        today = datetime.now().strftime('%A, %B %-d %Y')
+        # report_date_label is the previous day's date (e.g. "Sunday, May 3 2026")
+        label = report_date_label or datetime.now().strftime('%A, %B %-d %Y')
         temp_now = get_temp()
 
         # ── Build structured email body ────────────────────────────────────
         lines = [
-            f"🦅  ROOK DAILY DIGEST — {today}",
+            f"🦅  ROOK DAILY DIGEST — {label}",
             "=" * 48,
             "",
             "📊  ACTIVITY SUMMARY",
@@ -395,6 +610,22 @@ def send_daily_digest(notify_email, best_image_data, daily_stats, beast_cam_toda
             f"   📋  Total events: {daily_stats['total_events']}",
             "",
         ]
+
+        # ── Emoji activity stack ─────────────────────────────────────────────
+        # Compact chronological emoji timeline — every unique alert over the full 24h.
+        # Format:  06:14 🚶  ·  07:43 🚶🚶  ·  08:15 🗑️🚚 [lingering 47min]  ·  ...
+        if emoji_log:
+            lines += ["📌  ACTIVITY TIMELINE (24h)", ""]
+            # Compact single-line stack (scannable at a glance)
+            compact = "  ·  ".join(e for _, e in emoji_log)
+            lines.append(f"   {compact}")
+            lines.append("")
+            # Detailed per-event breakdown
+            for ts, evt in emoji_log:
+                lines.append(f"   {ts}  {evt}")
+            lines.append("")
+        else:
+            lines += ["📌  ACTIVITY TIMELINE — No notable events logged.", ""]
 
         if best_image_data["path"] and os.path.exists(best_image_data["path"]):
             lines += [
@@ -415,12 +646,12 @@ def send_daily_digest(notify_email, best_image_data, daily_stats, beast_cam_toda
 
         if beast_crops:
             lines += [
-                f"🐾  BEAST CAM — {len(beast_crops)} wildlife detection(s) today",
+                f"🐾  BEAST CAM — {len(beast_crops)} wildlife detection(s)",
                 "   (Cropped images attached below)",
                 "",
             ]
         else:
-            lines += ["🐾  BEAST CAM — No wildlife detected today.", ""]
+            lines += ["🐾  BEAST CAM — No wildlife detected.", ""]
 
         # System health
         lines += [
@@ -429,22 +660,14 @@ def send_daily_digest(notify_email, best_image_data, daily_stats, beast_cam_toda
             f"   📅  Report generated: {datetime.now().strftime('%H:%M:%S')}",
             "",
             "─" * 48,
-            "RAW LOG (today):",
-            "",
+            "Rook is watching. No raw log included — check ~/rook.log on device if needed.",
         ]
-
-        # Append raw log
-        try:
-            with open(LOG_FILE, "r") as f:
-                lines.append(f.read())
-        except Exception:
-            lines.append("[Log unavailable]")
 
         body = "\n".join(lines)
 
         # ── Compose email ──────────────────────────────────────────────────
         msg = EmailMessage()
-        msg["Subject"] = f"🦅 Rook Daily Digest — {datetime.now().strftime('%b %-d')}"
+        msg["Subject"] = f"🦅 Rook Digest — {label}"
         msg["From"] = smtp_user
         msg["To"] = notify_email
         msg.set_content(body)
@@ -489,6 +712,64 @@ def send_daily_digest(notify_email, best_image_data, daily_stats, beast_cam_toda
 
     except Exception as e:
         logging.error(f"❌ Failed to send daily digest: {e}")
+
+
+# ── Test Email ────────────────────────────────────────────────────────────────
+def send_test_email(cam):
+    """
+    Captures a live frame and emails it immediately as a diagnostic test.
+    Called once at startup when TEST_EMAIL env var is set to '1'.
+    """
+    try:
+        smtp_server = os.environ.get("SMTP_SERVER")
+        smtp_port = int(os.environ.get("SMTP_PORT", 587))
+        smtp_user = os.environ.get("SMTP_USER")
+        smtp_pass = os.environ.get("SMTP_PASS")
+        notify_email = os.environ.get("NOTIFY_EMAIL")
+
+        if not all([smtp_server, smtp_user, smtp_pass, notify_email]):
+            logging.warning("⚠️  Test email skipped — missing SMTP credentials.")
+            return
+
+        logging.info("📸 Capturing test frame for email diagnostic...")
+        frame = cam.capture_array()
+        if frame.shape[2] == 4:
+            frame = frame[:, :, :3]
+        flip_180 = os.environ.get("FLIP_180", "1") == "1"
+        if flip_180:
+            frame = cv2.rotate(frame, cv2.ROTATE_180)
+
+        test_path = "/tmp/rook_test.jpg"
+        cv2.imwrite(test_path, frame)
+
+        temp_now = get_temp()
+        uptime_raw = open("/proc/uptime").read().split()[0]
+        hours = int(float(uptime_raw)) // 3600
+        body = (
+            f"🦅 Rook Test Image\n"
+            f"Captured: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+            f"SoC Temp: {temp_now:.1f}°C  |  Uptime: {hours}h\n"
+            f"Frame size: {frame.shape[1]}×{frame.shape[0]}\n"
+        )
+
+        msg = EmailMessage()
+        msg["Subject"] = f"🦅 Rook Test — {datetime.now().strftime('%b %-d %H:%M')}"
+        msg["From"] = smtp_user
+        msg["To"] = notify_email
+        msg.set_content(body)
+
+        with open(test_path, "rb") as f:
+            msg.add_attachment(f.read(), maintype="image", subtype="jpeg", filename="rook_test.jpg")
+
+        with smtplib.SMTP(smtp_server, smtp_port) as server:
+            server.starttls()
+            server.login(smtp_user, smtp_pass)
+            server.send_message(msg)
+
+        logging.info(f"📧 Test image sent to {notify_email}")
+
+    except Exception as e:
+        logging.error(f"❌ Failed to send test email: {e}")
 
 
 # ── Real-Time Alert Dispatch ──────────────────────────────────────────────────
@@ -564,7 +845,12 @@ def dispatch_alerts_async(img_score, emojis, out_path, detected_classes):
         return
 
     if is_quiet_hours():
-        logging.info(f"   🔕 Quiet hours active. Alert suppressed: {emojis}")
+        # During quiet hours: suppress EMAIL (keep the bedroom silent), but allow Slack
+        # so notable overnight events (wildlife, incidents) still appear in Slack history.
+        if img_score >= MIN_SLACK_SCORE:
+            threading.Thread(target=send_slack_alert,
+                             args=(f"🌙 {emojis}",), daemon=True).start()
+        logging.info(f"   🔕 Quiet hours — email suppressed, Slack: {'sent' if img_score >= MIN_SLACK_SCORE else 'below threshold'} ({emojis})")
         return
 
     threads = []
@@ -629,6 +915,10 @@ def main():
     enrichment.start()
     logging.info("🌍 Enrichment service started (weather + iNat species context)")
 
+    # Scene intelligence trackers
+    fixture_filter  = SceneFixtureFilter()   # Auto-suppresses permanently static YOLO detections
+    lingerer        = LingererTracker()      # Fires delayed alerts for parked cars / loitering people
+
     # ── Per-day state ──────────────────────────────────────────────────────
     def fresh_stats():
         return {"traffic": 0, "pedestrians": 0, "animals": 0, "deliveries": 0, "total_events": 0}
@@ -637,6 +927,18 @@ def main():
     best_daily_image = {"score": 0, "path": None, "summary": ""}
     today_date = datetime.now().strftime('%Y-%m-%d')
     beast_cam_today_dir = os.path.join(BEAST_CAM_DIR, today_date)
+
+    # Emoji activity log: list of ("HH:MM", emoji_string) tuples, one per dispatched alert.
+    # Accumulates all day, snapshotted at midnight for the digest. This IS the 24h timeline.
+    daily_emoji_log: list = []
+
+    # Snapshot of previous day's stats — digest sent at 3 AM covers yesterday, not today.
+    # These are populated at midnight rollover and consumed by the digest at DIGEST_HOUR.
+    prev_day_stats = fresh_stats()
+    prev_day_best_image = {"score": 0, "path": None, "summary": ""}
+    prev_day_emoji_log: list = []  # 24h emoji timeline for the digest
+    prev_day_label = ""       # Human-readable date string for the digest subject
+    prev_day_beast_dir = ""   # Beast Cam dir for the previous day
     os.makedirs(beast_cam_today_dir, exist_ok=True)
 
     last_alert_time = 0
@@ -646,6 +948,7 @@ def main():
     last_thermal_check = 0
     last_digest_date = None
     last_heartbeat = time.time()  # Prevents immediate heartbeat on startup
+    last_forced_yolo = 0          # Timestamp of last periodic forced-YOLO run
     warmup_frame_count = 0        # MOG2 warmup: skip first 30 frames (no background model yet)
 
     # Startup notification — rate-limited to prevent spam during rapid restarts/power cycles.
@@ -670,6 +973,12 @@ def main():
         pass
 
     logging.info("🛡️ Rook is armed and watching...")
+
+    # One-shot test email: set TEST_EMAIL=1 in .env to receive a live frame on next startup.
+    # Useful for verifying SMTP credentials, camera angle, and flip orientation.
+    # The env var is checked once here — remove it from .env after use.
+    if os.environ.get("TEST_EMAIL", "0") == "1":
+        threading.Thread(target=send_test_email, args=(cam,), daemon=True).start()
 
     try:
         while True:
@@ -742,19 +1051,32 @@ def main():
             new_date = datetime.now().strftime('%Y-%m-%d')
 
             if new_date != today_date:
-                # Midnight rollover: reset all daily state
+                # Midnight rollover: snapshot the completed day's data for the upcoming digest,
+                # then reset all daily state for the new calendar day.
+                from datetime import timedelta as _td
+                _prev_dt = datetime.now() - _td(days=1)
+                prev_day_label = _prev_dt.strftime('%A, %B %-d %Y')
+                prev_day_stats = daily_stats.copy()
+                prev_day_best_image = best_daily_image.copy()
+                prev_day_emoji_log = list(daily_emoji_log)  # Full 24h emoji timeline
+                prev_day_beast_dir = beast_cam_today_dir  # points to the completed day's crops
+
                 today_date = new_date
                 beast_cam_today_dir = os.path.join(BEAST_CAM_DIR, today_date)
                 os.makedirs(beast_cam_today_dir, exist_ok=True)
                 daily_stats = fresh_stats()
+                daily_emoji_log = []  # Reset for new day
                 best_daily_image = {"score": 0, "path": None, "summary": ""}
+                fixture_filter.reset()  # Re-learn fixtures daily — allows scene changes to propagate
 
             if now_hour == DIGEST_HOUR and last_digest_date != today_date:
-                # Run digest in background — SMTP + crop attachment can take 10-30s
+                # Digest covers the *previous* calendar day (midnight→midnight), not the
+                # sparse 12am–3am window of the current day.
                 threading.Thread(
                     target=send_daily_digest,
-                    args=(os.environ.get("NOTIFY_EMAIL"), best_daily_image,
-                          daily_stats, os.path.join(BEAST_CAM_DIR, today_date)),
+                    args=(os.environ.get("NOTIFY_EMAIL"), prev_day_best_image,
+                          prev_day_stats, prev_day_beast_dir, prev_day_label,
+                          prev_day_emoji_log),
                     daemon=True,
                 ).start()
                 last_digest_date = today_date
@@ -766,26 +1088,55 @@ def main():
                 configure_camera_exposure(cam)
                 last_daytime_check = now_mono
 
-            # ── YOLO inference (always runs on motion) ─────────────────────
-            if motion_pixels > MOTION_THRESHOLD_PIXELS and largest_blob > MOTION_BLOB_MIN_PIXELS:
+            # ── YOLO inference gate ────────────────────────────────────────
+            # Fires on real motion (MOG2), OR on the periodic forced-YOLO timer
+            # which bypasses MOG2 to let LingererTracker observe absorbed-static objects.
+            forced_yolo = (now_mono - last_forced_yolo > FORCED_YOLO_INTERVAL
+                           and warmup_frame_count > 30)
+            run_yolo = ((motion_pixels > MOTION_THRESHOLD_PIXELS and largest_blob > MOTION_BLOB_MIN_PIXELS)
+                        or forced_yolo)
+
+            if run_yolo:
+                if forced_yolo:
+                    last_forced_yolo = now_mono
+                    logging.debug("   🔎 Forced YOLO scan (lingerer check).")
                 # Adaptive confidence: more sensitive during quiet hours (11PM-6AM)
                 # when a missed detection is worse than a false positive
-                base_conf = 0.25 if is_quiet_hours() else 0.30
+                base_conf = 0.25 if is_quiet_hours() else 0.35
                 frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 # Run YOLO at a lower baseline to catch everything, filter dynamic classes next
                 results = model(frame_rgb, imgsz=1088, conf=base_conf, verbose=False)
-                
+
                 # Dynamic Confidence Interval: Airborne objects require higher certainty
                 AIRBORNE_CLASSES = {"bird", "airplane", "kite"}
                 AIRBORNE_CONF_REQ = 0.45
-                
+
                 detected_classes = []
                 for i, cls_id in enumerate(results[0].boxes.cls):
                     cls_name = results[0].names[int(cls_id)]
                     conf = float(results[0].boxes.conf[i])
+                    if cls_name in IGNORED_CLASSES:
+                        continue  # Suppressed class — not present in this scene
                     if cls_name in AIRBORNE_CLASSES and conf < AIRBORNE_CONF_REQ:
                         continue  # Skip low-confidence airborne objects (distant noise)
                     detected_classes.append(cls_name)
+
+                # Feed fixture filter (learns static objects, then silently drops them)
+                frame_h, frame_w = frame.shape[:2]
+                fixture_filter.update(results[0].boxes, results[0].names, frame_w, frame_h)
+                detected_classes = fixture_filter.filter(
+                    detected_classes, results[0].boxes, results[0].names, frame_w, frame_h
+                )
+
+                # Update lingerer tracker — returns any threshold-crossing alerts
+                linger_alerts = lingerer.update(
+                    detected_classes, results[0].boxes, results[0].names, frame_w, frame_h
+                )
+                for linger_msg in linger_alerts:
+                    threading.Thread(target=send_slack_alert,
+                                     args=(f"⏱️ {linger_msg}",), daemon=True).start()
+                    # Log lingerer events into the daily emoji stack
+                    daily_emoji_log.append((datetime.now().strftime("%H:%M"), linger_msg))
 
                 if not detected_classes:
                     now_mono_arc = time.time()
@@ -882,6 +1233,8 @@ def main():
                     else:
                         dispatch_alerts_async(img_score, emojis, out_path, detected_classes)
                         last_alert_time = now
+                        # Log every dispatched alert into the 24h emoji timeline
+                        daily_emoji_log.append((datetime.now().strftime("%H:%M"), emojis))
 
                 last_detected_classes = detected_classes
 

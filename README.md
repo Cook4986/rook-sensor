@@ -16,14 +16,14 @@
 
 ## What It Does
 
-Rook is a sensor system that watches your yard and sends emoji summaries of what's happening — `🚚📦` for a delivery, `🦅` for a hawk, `🐺⚠️` for a possible coyote, `🌅` at sunrise, `🌆` at sunset.
+Rook is a sensor system that watches your yard and sends emoji summaries of what's happening — `🚚📦` for a delivery, `🦅` for a hawk, `🐺⚠️` for a possible coyote, `🌅` at sunrise, `🚗🔒` for a car parked over an hour.
 
 It runs 24/7 on a Raspberry Pi 5 with a Sony STARVIS camera and [YOLOv11n](https://docs.ultralytics.com/models/yolo11/), processing everything on-device.
 
 | Principle | How |
 |-----------|-----|
 | **Privacy by design** | No video saved or transmitted. Frames exist only in RAM during inference. |
-| **Signal over noise** | Solo cars are counted silently. Only meaningful activity fires a notification. |
+| **Signal over noise** | Solo cars counted silently. Static fixtures auto-suppressed. Only meaningful activity fires. |
 | **Always on** | Headless Pi 5 + Slack/Email. No subscriptions, no cloud GPU. |
 
 ---
@@ -39,19 +39,25 @@ Camera (IMX462 STARVIS, 1920×1080)
 │  640×360 downscale • ~3ms               │
 │  Two-stage: pixel count → blob analysis  │
 │  No motion? Sleep. YOLO never runs.      │
+│  Forced scan every 5 min (lingerer check)│
 └──────────┬───────────────────────────────┘
-           │ motion > 1000px, blob > 120px²
+           │ motion > threshold OR forced scan
            ▼
 ┌──────────────────────────────────────────┐
 │  Stage 2 — YOLO Inference (NCNN)         │
-│  imgsz=1088 • ~380ms (3× faster than PT)│
-│  conf=0.30 day / 0.25 night             │
-│  Score-adaptive cooldown (10–60s)        │
+│  imgsz=1088 • ~150ms (3× faster than PT)│
+│  conf=0.35 day / 0.25 night             │
+│  Ignored: train, traffic light, boat     │
+│  Airborne gate: conf ≥ 0.45             │
 └──────────┬───────────────────────────────┘
            │
            ▼
 ┌──────────────────────────────────────────┐
-│  Stage 3 — Enrichment                    │
+│  Stage 3 — Scene Intelligence            │
+│  • SceneFixtureFilter: auto-suppresses   │
+│    objects in ≥80% of recent inferences  │
+│  • LingererTracker: delayed alerts for   │
+│    parked cars (60min) / people (5min)   │
 │  • Open-Meteo weather (15-min cache)     │
 │  • iNat local species context            │
 │  • Color-sensitive bird ID               │
@@ -60,13 +66,15 @@ Camera (IMX462 STARVIS, 1920×1080)
            │
            ▼
       Slack + Email alert
+      + 24h Emoji Activity Log
 ```
 
 ---
 
 ## Emoji Vocabulary
 
-Rook tracks animate subjects only — people, wildlife, vehicles, and atmospheric events. Inanimate infrastructure is ignored.
+Rook tracks animate subjects — people, wildlife, vehicles, and atmospheric events.
+Permanently static scene fixtures are auto-learned and suppressed.
 
 | Emoji | Event |
 |-------|-------|
@@ -88,17 +96,39 @@ Rook tracks animate subjects only — people, wildlife, vehicles, and atmospheri
 | 🌅 | Sunrise (exposure mode switch) |
 | 🌆 | Sunset (exposure mode switch) |
 | 🐻 | Bear — immediate high-priority alert |
+| 🚗🔒 | Parked car (lingering > 60 min) |
+| 🚶⏱️ | Loitering person (lingering > 5 min) |
 
 ---
 
 ## Notifications
 
-- **Slack**: Real-time emoji alerts. Threshold: score ≥ 8. Startup cooldown: 5 minutes.
-- **Email/MMS**: High-priority events only (score ≥ 20), with annotated image attached.
-- **Daily Digest**: 3 AM email with activity summary, top event image, and Beast Cam wildlife crops.
+- **Slack**: Real-time emoji alerts at all hours. Threshold: score ≥ 8. Quiet hours (11 PM–6 AM) prefix alerts with 🌙 — no email.
+- **Email/MMS**: High-priority events only (score ≥ 30), with annotated image attached. Suppressed during quiet hours.
+- **Lingering alerts**: Slack-only. Fires when a tracked object holds its scene zone beyond its threshold (car: 60 min, person: 5 min). Re-alerts every 15 min if still present.
+- **Daily Digest**: 3 AM email covering the full **previous calendar day** (midnight→midnight). Includes activity counts, a 24h emoji timeline stack, top event image, and Beast Cam wildlife crops.
 - **Heartbeat**: Slack ping every 6 hours confirming the engine is alive.
 
-Score is based on event rarity in an urban yard context. Bear = 100. Solo car = 1. Cooldown shortens for high-score events (bear: 10s; pedestrian: 52s).
+Score is based on event rarity in an urban yard context. Bear = 100. Solo car = 1 (silent). Cooldown shortens for high-score events.
+
+---
+
+## Scene Intelligence
+
+### Fixture Suppression
+`SceneFixtureFilter` tracks which (class, zone) combinations appear in ≥ 80% of the last 60 inferences. Objects that persistently appear in the same screen position are promoted to **fixtures** and silently dropped — preventing a fixed houselight, signpost, or long-parked object from consuming the alert budget. Fixture list resets daily.
+
+### Lingering Object Detection
+`LingererTracker` observes objects across consecutive YOLO scans. A periodic forced YOLO run every 5 minutes bypasses the MOG2 motion gate so that objects absorbed into the background model (e.g., a car that stopped moving) are still tracked.
+
+### Suppressed Classes
+These COCO classes are never scored or alerted in this deployment:
+
+| Class | Reason |
+|-------|--------|
+| `train` | No rail infrastructure nearby — misclassifies dark boxy vehicles at distance |
+| `traffic light` | Park houselight across the street — persistent false positive |
+| `boat` | No navigable water nearby — park fence / reflective surface (observed live) |
 
 ---
 
@@ -139,7 +169,7 @@ chmod +x setup_pi.sh && ./setup_pi.sh
 
 ### 4. Configure Environment
 
-Create `~/.env`:
+Create `~/rook-env/.env`:
 ```
 SLACK_WEBHOOK_URL=https://hooks.slack.com/...
 NOTIFY_EMAIL=you@example.com
@@ -150,6 +180,7 @@ SMTP_PASS=your-app-password
 LATITUDE=40.71
 LONGITUDE=-74.00
 FLIP_180=1
+# TEST_EMAIL=1   # Uncomment to email a live frame on next restart (one-shot diagnostic)
 ```
 
 ### 5. Start Service
@@ -157,6 +188,20 @@ FLIP_180=1
 ```bash
 sudo systemctl enable --now rook.service
 ```
+
+---
+
+## Diagnostic Tools
+
+**Live frame test** (standalone — engine must be stopped):
+```bash
+source ~/rook-env/bin/activate
+python3 ~/frame_test.py --email        # Capture + infer + email annotated frame
+python3 ~/frame_test.py --benchmark    # 10-iteration inference timing
+```
+
+**In-engine test** (engine running — no camera conflict):
+Set `TEST_EMAIL=1` in `~/rook-env/.env` and restart the service. Sends a live frame immediately on startup, then resumes normal operation. Remove the flag after use.
 
 ---
 

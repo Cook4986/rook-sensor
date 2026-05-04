@@ -16,6 +16,8 @@ Rook translates yard activity into a compact emoji vocabulary. No video is trans
 | `🏍️` | `motorcycle` | Motorcycle or moped |
 | `🚲` | `bicycle` | Bicycle. **Silent** when alone. |
 
+> **Suppressed classes:** `train` (🚂) is fully ignored at the detection stage — no rail infrastructure in this scene. YOLO occasionally misclassifies dark, boxy vehicles at distance as trains.
+
 ---
 
 ## 2. Pedestrians
@@ -103,8 +105,8 @@ score = Σ (base_score × count^1.5) + (unique_classes × 5)
 
 | Score | Action |
 |---|---|
-| ≥ 1 | Slack ping (unless silent solo class) |
-| ≥ 15 | Slack + Email with attached image |
-| ≥ 50 | Slack + Email — rare/critical event |
+| ≥ 8  | **Slack** ping (unless silent solo class) |
+| ≥ 30 | **Slack + Email** with attached image — notable event |
+| ≥ 50 | **Slack + Email** — rare/critical event |
 
 **Silent solo classes:** `car`, `bicycle` — counted in daily traffic totals but no real-time notification when appearing alone. Mixed scenes (e.g. `car + person`) are not suppressed.
