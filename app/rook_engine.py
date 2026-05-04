@@ -20,7 +20,7 @@ load_dotenv(os.path.expanduser("~/rook-env/.env"))
 
 # ── Constants & Tunables ───────────────────────────────────────────────────────
 MOTION_THRESHOLD_PIXELS = 200   # ~50-100px changed for a 30px far subject; 200 passes anything YOLO can detect
-MOTION_BLOB_MIN_PIXELS = 80     # Min contiguous blob after dilation — ~9x9px at 640x360; clears distant 30px subjects
+MOTION_BLOB_MIN_PIXELS = 30     # Min contiguous blob after dilation — lowered from 80 to catch distant park subjects (~5x6px blobs at 640x360)
 COOLDOWN_SECONDS = 60           # Minimum seconds between ALERTS (not between inference)
 QUIET_HOURS_START = 23          # 11 PM
 QUIET_HOURS_END = 6             # 6 AM
@@ -788,7 +788,10 @@ def send_email_alert(emoji_summary, image_path):
         msg["Subject"] = emoji_summary
         msg["From"] = smtp_user
         msg["To"] = notify_email
-        msg.set_content(emoji_summary)
+        # Body is distinct from subject to prevent Gmail from showing the emoji string twice
+        # in the message list preview (subject + body-snippet concatenated).
+        alert_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        msg.set_content(f"Rook alert — {alert_time}\n{emoji_summary}\n")
 
         if os.path.exists(image_path):
             ctype, _ = mimetypes.guess_type(image_path)
