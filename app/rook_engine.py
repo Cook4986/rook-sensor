@@ -109,10 +109,15 @@ SCORE_MAP = {
 TRAFFIC_CLASSES    = {"car", "truck", "bus", "motorcycle", "bicycle"}
 
 # Classes fully suppressed from detection — not present in this scene and cause misclassification noise.
-# "train"        🚂  No rail infrastructure nearby — boxy dark vehicle misclassification.
-# "traffic light" 🚦  Park houselight persistently misclassified as traffic light.
-# "boat"         ⛵  No navigable water nearby — park fence/reflective surface misclassification (observed live).
-IGNORED_CLASSES    = {"train", "traffic light", "boat"}
+# "train"          🚂  No rail infrastructure nearby — boxy dark vehicle misclassification.
+# "traffic light"  🚦  Park houselight persistently misclassified as traffic light.
+# "boat"           ⛵  No navigable water nearby — park fence/reflective surface misclassification (observed live).
+# "fire hydrant"   🧯  Permanent street fixture — will never loiter in or out of scene.
+# "stop sign"      🛑  Permanent street fixture — static infrastructure, not an event.
+# "parking meter"  🅿️  Permanent street fixture — static infrastructure, not an event.
+# "bench"          🪑  Permanent park fixture — static furniture, not an event.
+IGNORED_CLASSES    = {"train", "traffic light", "boat",
+                      "fire hydrant", "stop sign", "parking meter", "bench"}
 
 # ── Lingerer Detection Thresholds ─────────────────────────────────────────────
 # How long an object must occupy the same scene zone before a lingering alert fires.

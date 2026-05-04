@@ -67,6 +67,7 @@ Identified hardware and software improvements from prototyping, assembly, and li
 | 🚂 Train emoji firing despite no rail nearby | `"train"` added to `IGNORED_CLASSES` — suppressed at detection stage, never scored or alerted. Likely a boxy dark vehicle misclassification at distance. |
 | Real-time emails firing too liberally | `MIN_EMAIL_SCORE` raised 20→30. Slack retains lower threshold (≥8) for broader coverage. |
 | No in-process diagnostic image send | `send_test_email(cam)` added to engine — set `TEST_EMAIL=1` in `.env` to receive a live frame on next restart. `frame_test.py --email` remains the preferred standalone test tool. |
+| 🧯 `[fire hydrant]` (and stop sign, parking meter, bench) triggering notifications | Added to `IGNORED_CLASSES` — permanent street/park fixtures will never loiter in or out of a scene. Suppressed at detection stage before scoring or alerting. |
 
 ---
 
