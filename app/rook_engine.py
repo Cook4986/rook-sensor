@@ -1146,7 +1146,7 @@ def main():
                         # Laplacian variance measures edge density — low variance = blurry/empty/uniform frame
                         gray = cv2.cvtColor(small_frame, cv2.COLOR_BGR2GRAY)
                         visual_interest = cv2.Laplacian(gray, cv2.CV_64F).var()
-                        if visual_interest < 80:
+                        if visual_interest < 250:
                             logging.debug(f"   Ghost motion (low visual interest: {visual_interest:.0f}). Skipping archive.")
                         else:
                             logging.info(f"   Ghost motion (interest={visual_interest:.0f}). Archiving frame for training.")
