@@ -46,9 +46,9 @@ Camera (IMX462 STARVIS, 1920×1080)
 ┌──────────────────────────────────────────┐
 │  Stage 2 — YOLO Inference (NCNN)         │
 │  imgsz=1088 • ~150ms (3× faster than PT)│
-│  conf=0.35 day / 0.25 night             │
+│  conf=0.45 day / 0.30 night             │
 │  Ignored: train, traffic light, boat     │
-│  Airborne gate: conf ≥ 0.45             │
+│  Airborne gate: conf ≥ 0.55             │
 └──────────┬───────────────────────────────┘
            │
            ▼
@@ -86,8 +86,9 @@ Permanently static scene fixtures are auto-learned and suppressed.
 | 🌂🚶 | Umbrella in use (rain event) |
 | 🚚📦 | Moving day (suitcase + person) |
 | 🐾🐾🐾 | Animal cluster (3+ animals) |
-| 🐺⚠️ | Possible coyote (solo dog, quiet/dawn hours) |
-| 🐕⚠️ | Loose dog (solo dog, daytime) |
+| 🐺⚠️ | Possible coyote (spatially isolated dog, quiet/dawn hours) |
+| 🐕⚠️ | Loose dog (spatially isolated dog, daytime) |
+| 🐕 | Accompanied dog (near a person — assumed on-leash, no alert) |
 | 🦅 | Raptor / solo bird |
 | 🔴🐦 | Possible cardinal (color-sensitive) |
 | 🔵🐦 | Possible bluebird / blue jay (color-sensitive) |
@@ -103,13 +104,13 @@ Permanently static scene fixtures are auto-learned and suppressed.
 
 ## Notifications
 
-- **Slack**: Real-time emoji alerts at all hours. Threshold: score ≥ 8. Quiet hours (11 PM–6 AM) prefix alerts with 🌙 — no email.
+- **Slack**: Real-time emoji alerts. Threshold: score ≥ 15. Quiet hours (11 PM–6 AM) prefix alerts with 🌙 — no email.
 - **Email/MMS**: High-priority events only (score ≥ 30), with annotated image attached. Suppressed during quiet hours.
 - **Lingering alerts**: Slack-only. Fires when a tracked object holds its scene zone beyond its threshold (car: 60 min, person: 5 min). Re-alerts every 15 min if still present.
-- **Daily Digest**: 3 AM email covering the full **previous calendar day** (midnight→midnight). Includes activity counts, a 24h emoji timeline stack, top event image, and Beast Cam wildlife crops.
+- **Daily Digest**: 3 AM email covering the full **previous calendar day**. Includes yesterday's activity counts, cumulative stats (this week / this month / all-time from `~/rook-stats.json`), top event image, and Beast Cam wildlife crops.
 - **Heartbeat**: Slack ping every 6 hours confirming the engine is alive.
 
-Score is based on event rarity in an urban yard context. Bear = 100. Solo car = 1 (silent). Cooldown shortens for high-score events.
+Score is based on event rarity in an urban yard context. Bear = 100. Solo car = 1 (silent). Congregation bonus: +15 for 3+ objects in scene, +25 for 5+. Cooldown shortens for high-score events.
 
 ---
 
@@ -203,6 +204,13 @@ python3 ~/frame_test.py --benchmark    # 10-iteration inference timing
 **In-engine test** (engine running — no camera conflict):
 Set `TEST_EMAIL=1` in `~/rook-env/.env` and restart the service. Sends a live frame immediately on startup, then resumes normal operation. Remove the flag after use.
 
+**Performance evaluation** (run from Mac or Pi after pulling `rook.log`):
+```bash
+python3 rook_eval.py                  # reads ~/rook.log, writes rook_eval_report.md
+python3 rook_eval.py /path/to/rook.log --json   # explicit path + JSON output
+```
+Produces a report covering detection volume, alert rate, fixture suppression, ghost-motion gate efficiency, thermal behavior, and automated recommendations.
+
 ---
 
 ## NCNN Model
@@ -221,13 +229,24 @@ The engine automatically falls back to `yolo11n.pt` if the NCNN directory is not
 
 ## Archive Sync (Mac)
 
-Unclassified motion frames are synced from the Pi to Dropbox every 15 minutes via crontab:
+Unclassified motion frames and Beast Cam wildlife crops are synced from the Pi to Dropbox every 15 minutes via crontab:
 
 ```
 */15 * * * * /path/to/rook-sensor/app/sync_archive.sh >> /tmp/rook_sync.log 2>&1
 ```
 
-Frames are saved at 640×360 (YOLO training resolution) to minimize SD card I/O.
+Frames are saved at 640×360 (YOLO training resolution) to minimize SD card I/O. The Pi auto-purges Beast Cam directories older than 7 days.
+
+**Manual export + clear** (e.g., after a thermal shutdown with no sync since last pull):
+```bash
+# Pull everything accumulated on the Pi
+bash rook-sensor/app/sync_archive.sh
+
+# After confirming sync, clear the Pi to free disk space
+ssh rook@rook.local "find ~/rook-archive/unclassified/ -name '*.jpg' -mtime +1 -delete"
+ssh rook@rook.local "find ~/beast_cam/ -name '*.jpg' -mtime +1 -delete"
+ssh rook@rook.local "df -h ~"   # verify space freed
+```
 
 ---
 

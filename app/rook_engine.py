@@ -1,4 +1,5 @@
 import os
+import json
 import time
 import cv2
 import smtplib
@@ -25,7 +26,7 @@ COOLDOWN_SECONDS = 60           # Minimum seconds between ALERTS (not between in
 QUIET_HOURS_START = 23          # 11 PM
 QUIET_HOURS_END = 6             # 6 AM
 MIN_EMAIL_SCORE = 30            # Score threshold for real-time email/MMS — rare/notable events only (Slack gets more)
-MIN_SLACK_SCORE = 8             # Score threshold for Slack — solo car (score=6) silenced; dog walker+ fires
+MIN_SLACK_SCORE = 15            # Score threshold for Slack — raised to suppress routine walk-bys; groups/wildlife fire
 THERMAL_CHECK_INTERVAL = 30     # Seconds between SoC temp reads (not per-frame)
 THERMAL_SOFT_LIMIT = 65.0       # °C: skip 2/3 frames to reduce CPU load
 THERMAL_WARN_LIMIT = 72.0       # °C: skip 5/6 frames — aggressive cooldown before hard 80°C shutdown
@@ -103,6 +104,13 @@ SCORE_MAP = {
     "horse":       8,
     # ─ Critical ───────────────────────────────────────────────────────────────
     "bear":      100,
+    # ─ Custom training targets (requires fine-tuned model — see training plan) ──
+    # "trash_truck":    15,   # Municipal: high recurrence cadence, contextual AM timing
+    # "ups_truck":      12,   # Delivery: UPS brown livery
+    # "fedex_truck":    12,   # Delivery: FedEx purple/orange or white
+    # "amazon_van":     12,   # Delivery: Amazon blue Sprinter/Transit Connect
+    # "baseball_player": 8,  # Custom: uniform + equipment
+    # "baseball_game":  50,   # Aggregate: crowd + uniforms + equipment (congregation event)
 }
 
 # ── Daily Stats Category Membership ──────────────────────────────────────────
@@ -360,8 +368,39 @@ def classify_bird_by_color(frame_bgr, box):
 
 
 
+# ── Dog Proximity Helper ─────────────────────────────────────────────────────
+def _count_unaccompanied_dogs(boxes, names, frame_h: int, frame_w: int,
+                               proximity_frac: float = 0.25) -> int:
+    """
+    Returns number of dogs NOT within proximity_frac of any person's centroid.
+    Dogs near a person are assumed on-leash and suppressed from loose-dog alerts.
+    proximity_frac is relative to frame diagonal.
+    """
+    if boxes is None or names is None or len(boxes.cls) == 0:
+        return 0
+    thresh = proximity_frac * (frame_w ** 2 + frame_h ** 2) ** 0.5
+    persons, dogs = [], []
+    for i, cls_id in enumerate(boxes.cls):
+        cls_name = names[int(cls_id)]
+        x1, y1, x2, y2 = boxes.xyxy[i].tolist()
+        cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+        if cls_name == "person":
+            persons.append((cx, cy))
+        elif cls_name == "dog":
+            dogs.append((cx, cy))
+    if not dogs:
+        return 0
+    if not persons:
+        return len(dogs)
+    unaccompanied = 0
+    for dx, dy in dogs:
+        if not any(((dx - px) ** 2 + (dy - py) ** 2) ** 0.5 <= thresh for px, py in persons):
+            unaccompanied += 1
+    return unaccompanied
+
+
 # ── Translation Heuristics ────────────────────────────────────────────────────
-def translate_to_emoji_summary(detected_classes, motion_pixels=0, frame_bgr=None, boxes=None):
+def translate_to_emoji_summary(detected_classes, motion_pixels=0, frame_bgr=None, boxes=None, names=None):
     """
     Converts YOLO detections to compact emoji string.
     Accepts optional motion_pixels (for runner heuristic) and frame_bgr + boxes
@@ -410,14 +449,20 @@ def translate_to_emoji_summary(detected_classes, motion_pixels=0, frame_bgr=None
         summary.append("🚚📦")
         counts["suitcase"] = 0
 
-    # Coyote heuristic: solo dog at night/dawn with no person
-    # COCO has no coyote class — lone dog at quiet hours is the best available signal
-    if counts.get("dog", 0) > 0 and counts.get("person", 0) == 0:
-        if quiet or datetime.now().hour in (5, 6, 7):
-            summary.append("🐺⚠️")   # Possible coyote
-        else:
-            summary.append("🐕⚠️")   # Loose dog
-        counts["dog"] = 0
+    # Loose dog / coyote heuristic — proximity-aware:
+    # Dogs within 25% of frame diagonal from a person are assumed on-leash and suppressed.
+    # Only spatially isolated dogs trigger alerts. COCO has no coyote class — lone dog at
+    # quiet hours is the best available proxy.
+    if counts.get("dog", 0) > 0:
+        fh, fw = (frame_bgr.shape[:2] if frame_bgr is not None else (1080, 1920))
+        unaccompanied = _count_unaccompanied_dogs(boxes, names, fh, fw)
+        if unaccompanied > 0:
+            if quiet or datetime.now().hour in (5, 6, 7):
+                summary.append("🐺⚠️")   # Possible coyote (solo dog, quiet hours)
+            else:
+                summary.append("🐕⚠️")   # Loose / unaccompanied dog
+        # Accompanied dogs fall through to generic 🐕 emoji via EMOJI_MAP
+        counts["dog"] = max(0, counts["dog"] - unaccompanied)
 
     # Raptor heuristic: bird detected without people (solo, potentially large)
     if counts.get("bird", 0) > 0 and counts.get("person", 0) == 0:
@@ -495,8 +540,15 @@ def calculate_image_score(detected_classes, weather_bonus: int = 0):
         base = SCORE_MAP.get(obj, 1)
         score += base * (count ** 1.5)
 
-    # Diversity bonus
-    score += len(counts) * 5
+    # Diversity bonus (reduced — was ×5, inflated routine two-class scenes past alert threshold)
+    score += len(counts) * 3
+
+    # Congregation bonus: 3+ active objects in scene = multi-subject event
+    total_objects = sum(counts.values())
+    if total_objects >= 5:
+        score += 25   # Dense congregation (rally, incident, parade)
+    elif total_objects >= 3:
+        score += 15   # Multi-subject scene (group + pets, mixed traffic, etc.)
 
     # Urban event bonuses
     person_count = counts.get("person", 0)
@@ -574,20 +626,69 @@ def save_beast_cam_crop(frame_rgb, boxes, classes, names, today_dir):
         cv2.imwrite(fname, crop)
 
 
+# ── Persistent Stats Database ─────────────────────────────────────────────────
+_STATS_DB_PATH = os.path.expanduser("~/rook-stats.json")
+
+
+def load_stats_db() -> dict:
+    """Load cumulative stats from disk. Returns a fresh schema if file is missing."""
+    try:
+        with open(_STATS_DB_PATH, "r") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {
+            "start_date": datetime.now().strftime("%Y-%m-%d"),
+            "all_time": {"traffic": 0, "pedestrians": 0, "animals": 0,
+                         "deliveries": 0, "total_events": 0,
+                         "best_score": 0, "best_summary": ""},
+            "daily_history": [],
+        }
+
+
+def save_stats_db(db: dict):
+    """Persist stats atomically via write-then-rename."""
+    import shutil
+    tmp = _STATS_DB_PATH + ".tmp"
+    try:
+        with open(tmp, "w") as f:
+            json.dump(db, f, indent=2)
+        shutil.move(tmp, _STATS_DB_PATH)
+    except Exception as e:
+        logging.warning(f"Stats DB save failed: {e}")
+
+
+def append_day_to_stats_db(day_stats: dict, day_label: str,
+                            best_score: int, best_summary: str):
+    """Append yesterday's totals and update all-time records. Called at midnight rollover."""
+    db = load_stats_db()
+    entry = {
+        "date": day_label,
+        "traffic":      day_stats.get("traffic", 0),
+        "pedestrians":  day_stats.get("pedestrians", 0),
+        "animals":      day_stats.get("animals", 0),
+        "deliveries":   day_stats.get("deliveries", 0),
+        "total_events": day_stats.get("total_events", 0),
+        "best_score":   best_score,
+        "best_summary": best_summary,
+    }
+    db["daily_history"].append(entry)
+    for key in ("traffic", "pedestrians", "animals", "deliveries", "total_events"):
+        db["all_time"][key] = db["all_time"].get(key, 0) + day_stats.get(key, 0)
+    if best_score > db["all_time"].get("best_score", 0):
+        db["all_time"]["best_score"] = best_score
+        db["all_time"]["best_summary"] = best_summary
+    save_stats_db(db)
+    logging.info(f"📊 Stats DB updated — {entry['total_events']} events on {day_label}")
+
+
 # ── Daily Digest ──────────────────────────────────────────────────────────────
 def send_daily_digest(notify_email, best_image_data, daily_stats, beast_cam_today_dir,
                       report_date_label: str = "", emoji_log: list = None):
     """
-    Sends overnight digest at DIGEST_HOUR (3 AM) covering the *previous* calendar
-    day's activity — not the current day (which would only represent ~3 hours of data).
-    Includes:
-      • Activity summary counts (traffic, pedestrians, animals, deliveries)
-      • Emoji activity stack — every notable event in chronological order
-      • Top event image attachment
-      • Beast Cam wildlife crops
-    Raw log is NOT included to keep the digest clean and scannable.
+    Sends overnight digest at DIGEST_HOUR (3 AM) covering the *previous* calendar day.
+    Includes yesterday's counts, cumulative stats (week/month/all-time from rook-stats.json),
+    top event image, and Beast Cam wildlife crops. No raw timeline.
     """
-    emoji_log = emoji_log or []
     try:
         smtp_server = os.environ.get("SMTP_SERVER")
         smtp_port = int(os.environ.get("SMTP_PORT", 587))
@@ -598,49 +699,66 @@ def send_daily_digest(notify_email, best_image_data, daily_stats, beast_cam_toda
             logging.error("Missing SMTP credentials for daily digest.")
             return
 
-        # report_date_label is the previous day's date (e.g. "Sunday, May 3 2026")
-        label = report_date_label or datetime.now().strftime('%A, %B %-d %Y')
+        label    = report_date_label or datetime.now().strftime('%A, %B %-d %Y')
         temp_now = get_temp()
 
-        # ── Build structured email body ────────────────────────────────────
+        # ── Cumulative stats from persistent DB ────────────────────────────
+        db       = load_stats_db()
+        history  = db.get("daily_history", [])
+        all_time = db.get("all_time", {})
+        start_dt = db.get("start_date", label)
+
+        from datetime import timedelta as _td
+        today_dt = datetime.now()
+
+        def _window(days: int) -> dict:
+            cutoff = (today_dt - _td(days=days)).strftime("%Y-%m-%d")
+            rows = [r for r in history if r.get("date", "") >= cutoff]
+            t = {"traffic": 0, "pedestrians": 0, "animals": 0, "deliveries": 0, "total_events": 0}
+            for r in rows:
+                for k in t:
+                    t[k] += r.get(k, 0)
+            return t
+
+        week  = _window(7)
+        month = _window(30)
+
+        def _row(s: dict) -> str:
+            return (f"   🚗 {s['traffic']:>5}  🚶 {s['pedestrians']:>5}  "
+                    f"🐾 {s['animals']:>5}  📦 {s['deliveries']:>5}  "
+                    f"📋 Total: {s['total_events']}")
+
+        # ── Build email body ───────────────────────────────────────────────
         lines = [
             f"🦅  ROOK DAILY DIGEST — {label}",
             "=" * 48,
             "",
-            "📊  ACTIVITY SUMMARY",
+            "📊  YESTERDAY",
             f"   🚗  Traffic:      {daily_stats['traffic']} events",
             f"   🚶  Pedestrians:  {daily_stats['pedestrians']} events",
             f"   🐾  Animals:      {daily_stats['animals']} events",
             f"   📦  Deliveries:   {daily_stats['deliveries']} events",
             f"   📋  Total events: {daily_stats['total_events']}",
             "",
+            "📈  CUMULATIVE STATS",
+            "   ─ This Week ─────────────────────────────────────",
+            _row(week),
+            "   ─ This Month ──────────────────────────────────",
+            _row(month),
+            f"   ─ All Time (since {start_dt}) ───────────────",
+            _row(all_time),
+            f"   🏆 Best score: {all_time.get('best_score', 0)} — {all_time.get('best_summary', 'N/A')}",
+            "",
         ]
-
-        # ── Emoji activity stack ─────────────────────────────────────────────
-        # Compact chronological emoji timeline — every unique alert over the full 24h.
-        # Format:  06:14 🚶  ·  07:43 🚶🚶  ·  08:15 🗑️🚚 [lingering 47min]  ·  ...
-        if emoji_log:
-            lines += ["📌  ACTIVITY TIMELINE (24h)", ""]
-            # Compact single-line stack (scannable at a glance)
-            compact = "  ·  ".join(e for _, e in emoji_log)
-            lines.append(f"   {compact}")
-            lines.append("")
-            # Detailed per-event breakdown
-            for ts, evt in emoji_log:
-                lines.append(f"   {ts}  {evt}")
-            lines.append("")
-        else:
-            lines += ["📌  ACTIVITY TIMELINE — No notable events logged.", ""]
 
         if best_image_data["path"] and os.path.exists(best_image_data["path"]):
             lines += [
-                f"🏆  TOP EVENT OF THE DAY",
+                "🏆  TOP EVENT — Yesterday",
                 f"   {best_image_data['summary']}  (Score: {best_image_data['score']})",
                 "   (See attached image)",
                 "",
             ]
 
-        # Beast Cam summary
         beast_crops = []
         if os.path.isdir(beast_cam_today_dir):
             beast_crops = sorted([
@@ -648,46 +766,39 @@ def send_daily_digest(notify_email, best_image_data, daily_stats, beast_cam_toda
                 for f in os.listdir(beast_cam_today_dir)
                 if f.endswith(".jpg")
             ])
-
         if beast_crops:
-            lines += [
-                f"🐾  BEAST CAM — {len(beast_crops)} wildlife detection(s)",
-                "   (Cropped images attached below)",
-                "",
-            ]
+            lines += [f"🐾  BEAST CAM — {len(beast_crops)} wildlife detection(s)",
+                      "   (Cropped images attached below)", ""]
         else:
             lines += ["🐾  BEAST CAM — No wildlife detected.", ""]
 
-        # System health
         lines += [
             "🖥️  SYSTEM HEALTH",
-            f"   🌡️  Current SoC Temp: {temp_now:.1f}°C",
-            f"   📅  Report generated: {datetime.now().strftime('%H:%M:%S')}",
+            f"   🌡️  SoC Temp: {temp_now:.1f}°C",
+            f"   📅  Report:   {datetime.now().strftime('%H:%M:%S')}",
             "",
             "─" * 48,
-            "Rook is watching. No raw log included — check ~/rook.log on device if needed.",
+            "Rook is watching. Check ~/rook.log on device for raw event log.",
         ]
 
         body = "\n".join(lines)
 
-        # ── Compose email ──────────────────────────────────────────────────
+        # ── Compose & send ─────────────────────────────────────────────────
         msg = EmailMessage()
         msg["Subject"] = f"🦅 Rook Digest — {label}"
-        msg["From"] = smtp_user
-        msg["To"] = notify_email
+        msg["From"]    = smtp_user
+        msg["To"]      = notify_email
         msg.set_content(body)
 
-        # Attach best image
         if best_image_data["path"] and os.path.exists(best_image_data["path"]):
             with open(best_image_data["path"], "rb") as f:
                 msg.add_attachment(f.read(), maintype="image", subtype="jpeg",
                                    filename="top_event.jpg")
 
-        # Attach Beast Cam crops (max 10 to keep email size reasonable)
         for crop_path in beast_crops[:10]:
             with open(crop_path, "rb") as f:
-                fname = os.path.basename(crop_path)
-                msg.add_attachment(f.read(), maintype="image", subtype="jpeg", filename=fname)
+                msg.add_attachment(f.read(), maintype="image", subtype="jpeg",
+                                   filename=os.path.basename(crop_path))
 
         with smtplib.SMTP(smtp_server, smtp_port) as server:
             server.starttls()
@@ -696,14 +807,11 @@ def send_daily_digest(notify_email, best_image_data, daily_stats, beast_cam_toda
 
         logging.info(f"📧 Daily digest sent to {notify_email} ({len(beast_crops)} beast cam crops)")
 
-        # Clear Beast Cam cache immediately after successful delivery
-        # User has the images in their inbox — no need to keep them on device.
         if os.path.isdir(beast_cam_today_dir):
             import shutil
             shutil.rmtree(beast_cam_today_dir, ignore_errors=True)
             logging.info(f"🗑️  Beast Cam cache cleared: {beast_cam_today_dir}")
 
-        # Reset log (use truncate to avoid conflicting with RotatingFileHandler)
         try:
             for h in logging.getLogger().handlers:
                 if hasattr(h, 'stream') and hasattr(h.stream, 'truncate'):
@@ -1068,6 +1176,10 @@ def main():
                 prev_day_best_image = best_daily_image.copy()
                 prev_day_emoji_log = list(daily_emoji_log)  # Full 24h emoji timeline
                 prev_day_beast_dir = beast_cam_today_dir  # points to the completed day's crops
+                # Persist stats to disk for cumulative digest reporting
+                append_day_to_stats_db(
+                    daily_stats, prev_day_label,
+                    best_daily_image["score"], best_daily_image["summary"])
 
                 today_date = new_date
                 beast_cam_today_dir = os.path.join(BEAST_CAM_DIR, today_date)
@@ -1110,14 +1222,14 @@ def main():
                     logging.debug("   🔎 Forced YOLO scan (lingerer check).")
                 # Adaptive confidence: more sensitive during quiet hours (11PM-6AM)
                 # when a missed detection is worse than a false positive
-                base_conf = 0.25 if is_quiet_hours() else 0.35
+                base_conf = 0.30 if is_quiet_hours() else 0.45
                 frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 # Run YOLO at a lower baseline to catch everything, filter dynamic classes next
                 results = model(frame_rgb, imgsz=1088, conf=base_conf, verbose=False)
 
                 # Dynamic Confidence Interval: Airborne objects require higher certainty
                 AIRBORNE_CLASSES = {"bird", "airplane", "kite"}
-                AIRBORNE_CONF_REQ = 0.45
+                AIRBORNE_CONF_REQ = 0.55
 
                 detected_classes = []
                 for i, cls_id in enumerate(results[0].boxes.cls):
@@ -1196,7 +1308,8 @@ def main():
                     detected_classes,
                     motion_pixels=motion_pixels,
                     frame_bgr=frame,
-                    boxes=results[0].boxes
+                    boxes=results[0].boxes,
+                    names=results[0].names,
                 )
 
                 # Append notable weather condition
