@@ -30,7 +30,9 @@ MIN_SLACK_SCORE = 15            # Score threshold for Slack — raised to suppre
 THERMAL_CHECK_INTERVAL = 30     # Seconds between SoC temp reads (not per-frame)
 THERMAL_SOFT_LIMIT = 65.0       # °C: skip 2/3 frames to reduce CPU load
 THERMAL_WARN_LIMIT = 72.0       # °C: skip 5/6 frames — aggressive cooldown before hard 80°C shutdown
-ARCHIVE_RATE_LIMIT_SECONDS = 30 # Minimum seconds between unclassified frame saves (kills SD write storms)
+ARCHIVE_RATE_LIMIT_SECONDS = 300 # Minimum seconds between unclassified frame saves — 5 min; kills SD write storms from wind events
+ARCHIVE_MIN_BLOB_PIXELS    = 500 # Cohesive blob must be ≥ this area (px²) to qualify for archive — wind scatter stays small after dilation
+ARCHIVE_MIN_CONCENTRATION  = 0.35 # largest_blob / motion_pixels ratio — wind is diffuse (~0.1–0.2); real subjects are concentrated (≥0.35)
 DIGEST_HOUR = 3                 # 3 AM — mathematically least-active hour, minimizes missed captures
 HEARTBEAT_INTERVAL = 6 * 3600  # Slack heartbeat every 6 hours (confirms system alive)
 LOG_FILE = os.path.expanduser("~/rook.log")
@@ -547,28 +549,47 @@ def calculate_image_score(detected_classes, weather_bonus: int = 0):
     total_objects = sum(counts.values())
     if total_objects >= 5:
         score += 25   # Dense congregation (rally, incident, parade)
+        score = max(score, 30)
     elif total_objects >= 3:
         score += 15   # Multi-subject scene (group + pets, mixed traffic, etc.)
+        score = max(score, 30)
 
     # Urban event bonuses
     person_count = counts.get("person", 0)
     if person_count >= 5:
         score += 30   # Large crowd: rally, incident, street closure
+        score = max(score, 30)
     elif person_count >= 3:
         score += 10   # Small gathering
+        score = max(score, 30)
 
     heavy = counts.get("truck", 0) + counts.get("bus", 0)
-    if heavy >= 2:
+    if heavy >= 1:
         score += 20   # Multiple heavy vehicles: fire response, utility, crash
+        score = max(score, 30)
 
-    if counts.get("dog", 0) > 0 and counts.get("person", 0) == 0:
-        score += 15   # Loose dog anomaly
+    # Unaccompanied animals
+    for animal in ["dog", "cat", "bear", "horse"]:
+        if counts.get(animal, 0) > 0 and counts.get("person", 0) == 0:
+            score += 15   # Loose animal anomaly
+            score = max(score, 30)
+
+    # Airborne phenomena
+    if counts.get("bird", 0) > 0 or counts.get("airplane", 0) > 0 or counts.get("kite", 0) > 0:
+        score = max(score, 30)
+        
+    # Sports
+    if any(counts.get(s, 0) > 0 for s in ["sports ball", "frisbee", "tennis racket", "baseball bat", "skis", "snowboard", "surfboard"]):
+        score = max(score, 30)
 
     # Quiet hours bonus: any person detected 11PM–6AM is inherently more notable
     if is_quiet_hours() and counts.get("person", 0) > 0:
         score += 20
+        score = max(score, 30)
 
     score += weather_bonus  # From enrichment: extreme weather WMO bonus
+    if weather_bonus > 0:
+        score = max(score, 30)
 
     return int(score)
 
@@ -599,6 +620,7 @@ def configure_camera_exposure(cam):
     if _last_daytime_state is not None and day != _last_daytime_state:
         msg = "🌅 Sunrise — Rook switching to daytime mode." if day else "🌆 Sunset — Rook switching to nighttime mode."
         threading.Thread(target=send_slack_alert, args=(msg,), daemon=True).start()
+        threading.Thread(target=send_email_alert, args=(msg, ""), daemon=True).start()
     _last_daytime_state = day
 
 
@@ -1252,30 +1274,37 @@ def main():
                 linger_alerts = lingerer.update(
                     detected_classes, results[0].boxes, results[0].names, frame_w, frame_h
                 )
-                for linger_msg in linger_alerts:
-                    threading.Thread(target=send_slack_alert,
-                                     args=(f"⏱️ {linger_msg}",), daemon=True).start()
-                    # Log lingerer events into the daily emoji stack
-                    daily_emoji_log.append((datetime.now().strftime("%H:%M"), linger_msg))
 
                 if not detected_classes:
                     now_mono_arc = time.time()
                     last_archive_save = getattr(main, '_last_archive_save', 0)
                     if now_mono_arc - last_archive_save >= ARCHIVE_RATE_LIMIT_SECONDS:
-                        # Visual interest gate: skip frames with no real content (pure wind/shadow/noise)
-                        # Laplacian variance measures edge density — low variance = blurry/empty/uniform frame
-                        gray = cv2.cvtColor(small_frame, cv2.COLOR_BGR2GRAY)
-                        visual_interest = cv2.Laplacian(gray, cv2.CV_64F).var()
-                        if visual_interest < 250:
-                            logging.debug(f"   Ghost motion (low visual interest: {visual_interest:.0f}). Skipping archive.")
+                        # ── Wind / ghost motion heuristics ────────────────────────────────
+                        # Wind creates: many scattered small blobs → low concentration ratio,
+                        # high Laplacian (sharp leaf/branch edges), but no cohesive subject.
+                        # Real (unclassifiable) subjects: large single blob, high concentration.
+                        #
+                        # Gate 1 — blob cohesion: largest_blob must be ≥ ARCHIVE_MIN_BLOB_PIXELS
+                        # Gate 2 — concentration: largest_blob / motion_pixels ≥ ARCHIVE_MIN_CONCENTRATION
+                        # Gate 3 — visual interest: Laplacian variance ≥ 250 (not blurry/dark)
+                        concentration = largest_blob / max(motion_pixels, 1)
+                        if largest_blob < ARCHIVE_MIN_BLOB_PIXELS:
+                            logging.debug(f"   Ghost motion (blob too small: {largest_blob:.0f}px²). Skipping archive.")
+                        elif concentration < ARCHIVE_MIN_CONCENTRATION:
+                            logging.debug(f"   Ghost motion (diffuse wind, conc={concentration:.2f}). Skipping archive.")
                         else:
-                            logging.info(f"   Ghost motion (interest={visual_interest:.0f}). Archiving frame for training.")
-                            archive_dir = os.path.expanduser("~/rook-archive/unclassified")
-                            os.makedirs(archive_dir, exist_ok=True)
-                            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-                            small_save = cv2.resize(frame, (640, 360))
-                            cv2.imwrite(os.path.join(archive_dir, f"unclassified_{ts}.jpg"), small_save)
-                            main._last_archive_save = now_mono_arc
+                            gray = cv2.cvtColor(small_frame, cv2.COLOR_BGR2GRAY)
+                            visual_interest = cv2.Laplacian(gray, cv2.CV_64F).var()
+                            if visual_interest < 250:
+                                logging.debug(f"   Ghost motion (low visual interest: {visual_interest:.0f}). Skipping archive.")
+                            else:
+                                logging.info(f"   Ghost motion (interest={visual_interest:.0f}, blob={largest_blob:.0f}px², conc={concentration:.2f}). Archiving.")
+                                archive_dir = os.path.expanduser("~/rook-archive/unclassified")
+                                os.makedirs(archive_dir, exist_ok=True)
+                                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                                small_save = cv2.resize(frame, (640, 360))
+                                cv2.imwrite(os.path.join(archive_dir, f"unclassified_{ts}.jpg"), small_save)
+                                main._last_archive_save = now_mono_arc
                     else:
                         logging.debug("   Ghost motion (rate-limited, skipping save).")
                     time.sleep(0.15)
@@ -1313,8 +1342,9 @@ def main():
                 )
 
                 # Append notable weather condition
+                weather_bonus = enrichment.get_weather_score_bonus()
                 weather_emoji = enrichment.get_weather_emoji()
-                if weather_emoji and enrichment.get_weather_score_bonus() > 0:
+                if weather_emoji and weather_bonus > 0:
                     emojis = f"{emojis} {weather_emoji}"
 
                 # Append vision-detected frame condition (fog / deep night)
@@ -1334,8 +1364,16 @@ def main():
                 out_path = "/tmp/rook_alert.jpg"
                 cv2.imwrite(out_path, annotated)
 
+                for linger_msg in linger_alerts:
+                    threading.Thread(target=send_slack_alert,
+                                     args=(f"⏱️ {linger_msg}",), daemon=True).start()
+                    threading.Thread(target=send_email_alert,
+                                     args=(f"⏱️ {linger_msg}", out_path), daemon=True).start()
+                    # Log lingerer events into the daily emoji stack
+                    daily_emoji_log.append((datetime.now().strftime("%H:%M"), linger_msg))
+
                 # Daily best image tracking
-                img_score = calculate_image_score(detected_classes)
+                img_score = calculate_image_score(detected_classes, weather_bonus=weather_bonus)
                 if img_score > best_daily_image["score"]:
                     best_path = "/tmp/rook_best_daily.jpg"
                     cv2.imwrite(best_path, annotated)
