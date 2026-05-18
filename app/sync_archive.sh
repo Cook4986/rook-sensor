@@ -91,10 +91,8 @@ sync_dir() {
         return
     fi
 
-    # scp new files in batches of 50
-    echo "$NEW_FILES" | tr ' ' '\n' | grep -v '^$' | while read -r batch; do
-        scp $SSH_OPTS "$PI_USER@$PI_HOST:$REMOTE_DIR/$batch" "$LOCAL_DIR/" 2>/dev/null || true
-    done
+    # Use tar over SSH for fast batch transfer
+    echo "$NEW_FILES" | tr ' ' '\n' | grep -v '^$' | ssh $SSH_OPTS "$PI_USER@$PI_HOST" "cd $REMOTE_DIR && tar -cf - -T -" | tar -xf - -C "$LOCAL_DIR/" 2>/dev/null || true
 
     echo "   ✅ $LABEL: $NEW_COUNT new file(s) transferred."
 }

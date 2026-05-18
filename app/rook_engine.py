@@ -532,8 +532,8 @@ def translate_to_emoji_summary(detected_classes, motion_pixels=0, frame_bgr=None
 
 
 # ── Sun / Day-Night (cached at module level) ──────────────────────────────────
-_lat = float(os.environ.get("LATITUDE", "0.0"))
-_lon = float(os.environ.get("LONGITUDE", "0.0"))
+_lat = float(os.environ.get("LATITUDE") or 0.0)
+_lon = float(os.environ.get("LONGITUDE") or 0.0)
 _sun = Sun(_lat, _lon)
 
 
@@ -626,7 +626,7 @@ def get_temp():
     try:
         with open('/sys/class/thermal/thermal_zone0/temp', 'r') as f:
             return float(f.read()) / 1000.0
-    except Exception:
+    except (FileNotFoundError, ValueError, OSError):
         return 0.0
 
 
