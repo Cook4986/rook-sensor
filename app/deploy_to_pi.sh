@@ -11,8 +11,9 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 echo "📤 Deploying Rook scripts to ${HOST}..."
 
-scp "${SCRIPT_DIR}/setup_pi.sh"   "${HOST}:~/setup_pi.sh"
-scp "${SCRIPT_DIR}/frame_test.py" "${HOST}:~/frame_test.py"
+scp "${SCRIPT_DIR}"/*.py "${HOST}:~/"
+scp "${SCRIPT_DIR}"/*.sh "${HOST}:~/"
+chmod +x "${SCRIPT_DIR}"/*.sh
 
 echo ""
 echo "✅ Deployed! SSH in and run:"
@@ -21,4 +22,5 @@ echo "   bash ~/setup_pi.sh    # Full Phase 3-5 setup"
 echo "   sudo reboot           # Required after driver install"
 echo "   # After reboot:"
 echo "   source ~/rook-env/bin/activate"
+echo "   sudo systemctl restart rook"
 echo "   python3 ~/frame_test.py --benchmark --sms"

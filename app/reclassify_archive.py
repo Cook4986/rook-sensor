@@ -9,7 +9,7 @@ archive/reclassified/ with annotated images, and sends a Slack digest.
 
 Usage:
     python3 reclassify_archive.py              # process all pending frames
-    python3 reclassify_archive.py --model x   # use yolo11x.pt (maximum quality)
+    python3 reclassify_archive.py --model x   # use yolo26x.pt (maximum quality)
     python3 reclassify_archive.py --dry-run   # report without moving files
 
 Run automatically: add to launchd alongside sync, or run manually after sync.
@@ -65,7 +65,7 @@ def send_slack(text):
 def main():
     parser = argparse.ArgumentParser(description="Rook offline re-inference pass")
     parser.add_argument("--model", default="l", choices=["n", "s", "m", "l", "x"],
-                        help="YOLOv11 model size (default: l)")
+                        help="YOLO26 model size (default: l)")
     parser.add_argument("--dry-run", action="store_true",
                         help="Print findings without moving files or alerting")
     parser.add_argument("--slack", action="store_true",
@@ -76,7 +76,7 @@ def main():
     from ultralytics import YOLO
     import cv2
 
-    model_name = f"yolo11{args.model}.pt"
+    model_name = f"yolo26{args.model}.pt"
     print(f"🔭 Rook Mac Inference — loading {model_name}...")
 
     # Use MPS on Apple Silicon, fall back to CPU

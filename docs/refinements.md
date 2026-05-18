@@ -65,7 +65,7 @@ Identified hardware and software improvements from prototyping, assembly, and li
 | Digest showed zero activity (12am–3am window) | Fixed: digest now snapshots the **previous** calendar day at midnight rollover; sent at 3 AM it covers the full day |
 | Raw log in digest email was noisy | Removed from digest body — log remains on device at `~/rook.log` |
 | 🚂 Train emoji firing despite no rail nearby | `"train"` added to `IGNORED_CLASSES` — suppressed at detection stage, never scored or alerted. Likely a boxy dark vehicle misclassification at distance. |
-| Real-time emails firing too liberally | `MIN_EMAIL_SCORE` raised 20→30. Slack retains lower threshold (≥8) for broader coverage. |
+| Real-time alerts firing too liberally | Both `MIN_EMAIL_SCORE` and `MIN_SLACK_SCORE` aligned to 30. Eliminates routine walk-bys, restricting alerts to high-relevance events. |
 | No in-process diagnostic image send | `send_test_email(cam)` added to engine — set `TEST_EMAIL=1` in `.env` to receive a live frame on next restart. `frame_test.py --email` remains the preferred standalone test tool. |
 | 🧯 `[fire hydrant]` (and stop sign, parking meter, bench) triggering notifications | Added to `IGNORED_CLASSES` — permanent street/park fixtures will never loiter in or out of a scene. Suppressed at detection stage before scoring or alerting. |
 

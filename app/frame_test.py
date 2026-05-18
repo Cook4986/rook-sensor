@@ -200,8 +200,13 @@ def main():
     print("📷 Capturing frame...")
     frame = capture_frame()
 
-    print("🧠 Loading YOLOv11n...")
-    model = YOLO("yolo11n.pt")
+    print("🧠 Loading YOLO model...")
+    try:
+        model = YOLO("yolo26n.pt")
+        print("   Using YOLO26n")
+    except Exception:
+        model = YOLO("yolo11n.pt")
+        print("   Using YOLO11n (fallback)")
 
     print("🔍 Running inference...")
     results = run_inference(model, frame)

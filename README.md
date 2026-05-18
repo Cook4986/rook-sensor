@@ -18,7 +18,7 @@
 
 Rook is a sensor system that watches your yard and sends emoji summaries of what's happening — `🚚📦` for a delivery, `🦅` for a hawk, `🐺⚠️` for a possible coyote, `🌅` at sunrise, `🚗🔒` for a car parked over an hour.
 
-It runs 24/7 on a Raspberry Pi 5 with a Sony STARVIS camera and [YOLOv11n](https://docs.ultralytics.com/models/yolo11/), processing everything on-device.
+It runs 24/7 on a Raspberry Pi 5 with a Sony STARVIS camera and [YOLO26n](https://docs.ultralytics.com/models/yolo11/), processing everything on-device.
 
 | Principle | Implementation |
 |---|---|
@@ -45,9 +45,9 @@ The camera feed is downscaled to **640×360** and passed through OpenCV's MOG2 b
 
 If neither passes, the frame is discarded and YOLO never runs — saving ~150ms of CPU per idle frame. A **forced YOLO scan** every 5 minutes bypasses this gate to catch objects that MOG2 has absorbed into the background model (e.g., a car that parked and stopped moving).
 
-### Stage 2 — Object Detection (YOLOv11n NCNN)
+### Stage 2 — Object Detection (YOLO26n NCNN)
 
-Qualifying frames are upscaled to **1088px** and passed through YOLOv11n exported to [NCNN format](https://github.com/Tencent/ncnn) for ~3× faster inference vs. PyTorch on CPU (~150ms per frame).
+Qualifying frames are upscaled to **1088px** and passed through YOLO26n exported to [NCNN format](https://github.com/Tencent/ncnn) for ~3× faster inference vs. PyTorch on CPU (~150ms per frame).
 
 | Parameter | Value | Rationale |
 |---|---|---|
@@ -70,10 +70,8 @@ Detections pass through four enrichment layers before scoring:
 
 Each detection set is scored by `calculate_image_score()`. Score determines notification routing:
 
-```
-Score ≥ 15  →  Slack alert
 Score ≥ 30  →  Slack + Email (with annotated image)
-Score < 15  →  Logged to daily digest only
+Score < 30  →  Logged to daily digest only
 ```
 
 Score bonuses ensure multi-subject events always notify:
@@ -140,7 +138,7 @@ Rook translates detections into contextual emoji summaries. Composite heuristics
 
 | Channel | Threshold | Behavior |
 |---|---|---|
-| **Slack** | Score ≥ 15 | Real-time emoji alert. Active 24/7. |
+| **Slack** | Score ≥ 30 | Real-time emoji alert. Active 24/7. |
 | **Email/MMS** | Score ≥ 30 | High-priority events with annotated image. **Suppressed during quiet hours** (11 PM–6 AM). |
 | **Lingerer alerts** | Threshold-based | Direct Slack + Email. Bypass score gate. Re-alert every 15 min. |
 | **Daily Digest** | Automatic | 3 AM email: yesterday's activity counts, cumulative stats, top event image, Beast Cam crops. |
@@ -331,15 +329,15 @@ python3 app/thermal_stress_test.py     # default 5-minute stress run
 
 ## NCNN Model
 
-The engine uses YOLOv11n exported to [NCNN format](https://github.com/Tencent/ncnn) at `imgsz=1088` for ~3× faster inference vs. PyTorch on CPU. The export is handled automatically by `setup_pi.sh`, but to regenerate manually:
+The engine uses YOLO26n exported to [NCNN format](https://github.com/Tencent/ncnn) at `imgsz=1088` for ~3× faster inference vs. PyTorch on CPU. The export is handled automatically by `setup_pi.sh`, but to regenerate manually:
 
 ```bash
 source ~/rook-env/bin/activate
-python3 -c "from ultralytics import YOLO; YOLO('yolo11n.pt').export(format='ncnn', imgsz=1088)"
-mv yolo11n_ncnn_model yolo11n_1088_ncnn_model
+python3 -c "from ultralytics import YOLO; YOLO('yolo26n.pt').export(format='ncnn', imgsz=1088)"
+mv yolo26n_ncnn_model yolo26n_1088_ncnn_model
 ```
 
-The engine automatically falls back to `yolo11n.pt` (PyTorch) if the NCNN directory is not found.
+The engine automatically falls back to `yolo26n.pt` (PyTorch) if the NCNN directory is not found.
 
 ---
 
@@ -400,11 +398,11 @@ ssh rook@rook.local "df -h ~"   # verify space freed
 
 ## Custom Model Training
 
-The base YOLOv11n model covers 80 COCO classes but cannot distinguish site-specific objects (Amazon van vs. generic truck, trash truck vs. delivery). See [`rook_custom_model_proposal.md`](rook_custom_model_proposal.md) for the full pipeline:
+The base YOLO26n model covers 80 COCO classes but cannot distinguish site-specific objects (Amazon van vs. generic truck, trash truck vs. delivery). See [`rook_custom_model_proposal.md`](rook_custom_model_proposal.md) for the full pipeline:
 
 1. **Data mining** — Unclassified archive + Beast Cam crops provide training data
 2. **Annotation** — Roboflow or CVAT for bounding box labeling (target: 300–500 samples per class)
-3. **Fine-tuning** — Transfer learning on `yolo11n.pt` with `imgsz=1088` to match deployment resolution
+3. **Fine-tuning** — Transfer learning on `yolo26n.pt` with `imgsz=1088` to match deployment resolution
 4. **NCNN export** — Required to maintain ~150ms inference on the Pi's CPU
 5. **Integration** — Add new classes to `SCORE_MAP`, `EMOJI_MAP`, and scene heuristics
 

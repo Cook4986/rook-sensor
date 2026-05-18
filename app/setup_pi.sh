@@ -75,5 +75,7 @@ echo "      rpicam-still -o test.jpg --width 1920 --height 1080 -t 2000"
 echo "   3. sudo tailscale up  (follow the auth URL)"
 echo "   4. Edit ~/rook-env/.env with Twilio credentials"
 echo "   5. Run the YOLO benchmark:"
-echo '      source ~/rook-env/bin/activate && python3 ~/frame_test.py'
+echo '      source ~/rook-env/bin/activate && python3 -c "from ultralytics import YOLO; YOLO(\"yolo26n.pt\").export(format=\"ncnn\", imgsz=1088)"'
+echo '      mv yolo26n_ncnn_model ~/yolo26n_1088_ncnn_model'
+echo '      python3 ~/frame_test.py'
 echo "═══════════════════════════════════════════"

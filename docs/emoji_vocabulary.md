@@ -105,7 +105,6 @@ score = Σ (base_score × count^1.5) + (unique_classes × 5)
 
 | Score | Action |
 |---|---|
-| ≥ 8  | **Slack** ping (unless silent solo class) |
 | ≥ 30 | **Slack + Email** with attached image — notable event |
 | ≥ 50 | **Slack + Email** — rare/critical event |
 

@@ -25,14 +25,15 @@ MOTION_BLOB_MIN_PIXELS = 30     # Min contiguous blob after dilation — lowered
 COOLDOWN_SECONDS = 60           # Minimum seconds between ALERTS (not between inference)
 QUIET_HOURS_START = 23          # 11 PM
 QUIET_HOURS_END = 6             # 6 AM
-MIN_EMAIL_SCORE = 30            # Score threshold for real-time email/MMS — rare/notable events only (Slack gets more)
-MIN_SLACK_SCORE = 15            # Score threshold for Slack — raised to suppress routine walk-bys; groups/wildlife fire
+MIN_EMAIL_SCORE = 30            # Score threshold for real-time email/MMS
+MIN_SLACK_SCORE = 30            # Score threshold for Slack — aligned with high-relevance events only (>=30)
 THERMAL_CHECK_INTERVAL = 30     # Seconds between SoC temp reads (not per-frame)
 THERMAL_SOFT_LIMIT = 65.0       # °C: skip 2/3 frames to reduce CPU load
 THERMAL_WARN_LIMIT = 72.0       # °C: skip 5/6 frames — aggressive cooldown before hard 80°C shutdown
-ARCHIVE_RATE_LIMIT_SECONDS = 300 # Minimum seconds between unclassified frame saves — 5 min; kills SD write storms from wind events
-ARCHIVE_MIN_BLOB_PIXELS    = 500 # Cohesive blob must be ≥ this area (px²) to qualify for archive — wind scatter stays small after dilation
-ARCHIVE_MIN_CONCENTRATION  = 0.35 # largest_blob / motion_pixels ratio — wind is diffuse (~0.1–0.2); real subjects are concentrated (≥0.35)
+ARCHIVE_RATE_LIMIT_SECONDS = 600  # Minimum seconds between unclassified frame saves — 10 min (was 5); reduces clockwork ambient captures
+ARCHIVE_MIN_BLOB_PIXELS    = 800  # Cohesive blob must be ≥ this area (px²) — raised from 500 to reject marginal foliage blobs
+ARCHIVE_MIN_CONCENTRATION  = 0.40 # largest_blob / motion_pixels ratio — tightened from 0.35; wind is diffuse (~0.1–0.2), real subjects ≥0.40
+ARCHIVE_PERSISTENCE_REQ    = 2    # Must trigger on N consecutive qualifying YOLO passes before archiving — filters one-off wind gusts
 DIGEST_HOUR = 3                 # 3 AM — mathematically least-active hour, minimizes missed captures
 HEARTBEAT_INTERVAL = 6 * 3600  # Slack heartbeat every 6 hours (confirms system alive)
 LOG_FILE = os.path.expanduser("~/rook.log")
@@ -143,6 +144,8 @@ LINGER_THRESHOLDS = {
 LINGER_ZONE_GRID  = 4    # NxN grid cells for zone comparison (coarser = more tolerant of drift)
 LINGER_COOLDOWN   = 900  # Re-alert at most every 15 min per lingering object (prevents spam)
 FORCED_YOLO_INTERVAL = 300  # Seconds between forced YOLO runs bypassing MOG2 gate (catches absorbed objects)
+LINGER_GRACE_FRAMES  = 3    # Tolerate N consecutive missed detections before evicting a lingerer
+                            # (covers brief occlusions, confidence oscillation at 0.70, thermal frame-skip gaps)
 
 # Per-class emoji shown when a lingering threshold fires.
 # Truck detected early morning at the curb → almost certainly a trash truck.
@@ -246,7 +249,16 @@ class SceneFixtureFilter:
             cy = ((y1 + y2) / 2) / max(frame_h, 1)
             key = (cls_name, self._zone(cx, cy))
             if key in self._fixtures:
-                logging.debug(f"   📌 Fixture suppressed: {cls_name} @ zone {key[1]}")
+                # Exempt lingerer-tracked classes from fixture suppression:
+                # A parked car becomes a "fixture" after ~48s of consistent presence,
+                # but the lingerer needs to observe it for up to 1 hour to fire an alert.
+                # Without this exemption, fixtures silently vanish before reaching
+                # LINGER_THRESHOLDS, causing missed parked-car and loiterer alerts.
+                if cls_name in LINGER_THRESHOLDS:
+                    cleaned.append(cls_name)  # Let lingerer tracker continue observing
+                    logging.debug(f"   📌 Fixture (lingerer-exempt): {cls_name} @ zone {key[1]}")
+                else:
+                    logging.debug(f"   📌 Fixture suppressed: {cls_name} @ zone {key[1]}")
             else:
                 cleaned.append(cls_name)
         # Preserve any classes not in boxes (shouldn't happen, but safety net)
@@ -279,7 +291,7 @@ class LingererTracker:
     - On disappearance, evict the entry.
     """
     def __init__(self):
-        # key: (class_name, zone) → {"first_seen": float, "last_alerted": float}
+        # key: (class_name, zone) → {"first_seen": float, "last_alerted": float, "miss_count": int}
         self._tracked: dict = {}
 
     def _zone(self, cx_norm: float, cy_norm: float) -> tuple:
@@ -310,12 +322,26 @@ class LingererTracker:
             current_keys.add(key)
 
             if key not in self._tracked:
-                self._tracked[key] = {"first_seen": now, "last_alerted": 0}
+                self._tracked[key] = {"first_seen": now, "last_alerted": 0, "miss_count": 0}
+            else:
+                self._tracked[key]["miss_count"] = 0  # Re-detected → reset miss counter
 
-        # Evict keys no longer present
-        gone = set(self._tracked.keys()) - current_keys
-        for key in gone:
-            logging.debug(f"   ⏱️  Lingerer cleared: {key[0]} left zone {key[1]}")
+        # Grace period eviction: tolerate brief occlusions / confidence dips
+        # before discarding accumulated dwell time. At thermal throttling (1-in-6
+        # frames) + FORCED_YOLO_INTERVAL=300s, each miss can span ~5 minutes,
+        # so 3 grace frames = ~15 minutes of tolerance.
+        to_evict = []
+        for key in self._tracked:
+            if key not in current_keys:
+                self._tracked[key]["miss_count"] = self._tracked[key].get("miss_count", 0) + 1
+                if self._tracked[key]["miss_count"] >= LINGER_GRACE_FRAMES:
+                    logging.debug(f"   ⏱️  Lingerer cleared: {key[0]} left zone {key[1]} "
+                                  f"(absent {self._tracked[key]['miss_count']} frames)")
+                    to_evict.append(key)
+                else:
+                    logging.debug(f"   ⏱️  Lingerer grace: {key[0]} @ zone {key[1]} "
+                                  f"(miss {self._tracked[key]['miss_count']}/{LINGER_GRACE_FRAMES})")
+        for key in to_evict:
             del self._tracked[key]
 
         # Check thresholds and build alerts
@@ -1024,22 +1050,36 @@ def _purge_old_beast_cam(days: int = 7):
 def main():
     logging.info("🚀 Initializing Rook Engine...")
 
-    # Load NCNN model for 3x faster inference (exported from yolo11n.pt at imgsz=1088).
-    # Falls back to PyTorch .pt if NCNN model is not present on device.
-    _ncnn_path = os.path.expanduser("~/yolo11n_1088_ncnn_model")
-    if os.path.isdir(_ncnn_path):
-        model = YOLO(_ncnn_path, task="detect")
-        # Pin NCNN to 3 of Pi 5's 4 cores — leaves 1 for OS/camera ISP, reduces contention
+    # Model loading priority: YOLO26n NCNN → YOLO11n NCNN → YOLO26n.pt → yolo11n.pt
+    # YOLO26n: 43% faster CPU inference, NMS-free end-to-end, STAL small-target detection.
+    # Falls back gracefully so the engine runs with whatever model is on-device.
+    _yolo26_ncnn = os.path.expanduser("~/yolo26n_1088_ncnn_model")
+    _yolo11_ncnn = os.path.expanduser("~/yolo11n_1088_ncnn_model")
+    _model_label = None
+    if os.path.isdir(_yolo26_ncnn):
+        model = YOLO(_yolo26_ncnn, task="detect")
+        _model_label = "YOLO26n (NCNN)"
+    elif os.path.isdir(_yolo11_ncnn):
+        model = YOLO(_yolo11_ncnn, task="detect")
+        _model_label = "YOLOv11n (NCNN)"
+    else:
+        # PyTorch fallback — try yolo26n first, then yolo11n
+        try:
+            model = YOLO("yolo26n.pt")
+            _model_label = "YOLO26n (PyTorch)"
+        except Exception:
+            model = YOLO("yolo11n.pt")
+            _model_label = "YOLOv11n (PyTorch)"
+        logging.warning(f"⚠️  NCNN model not found, falling back to {_model_label}.")
+    # Pin NCNN to 3 of Pi 5's 4 cores — leaves 1 for OS/camera ISP, reduces contention
+    if "NCNN" in (_model_label or ""):
         try:
             import ncnn
             ncnn.set_num_threads(3)
-            logging.info("🚀 YOLOv11n loaded (NCNN, 3 threads).")
+            _model_label += ", 3 threads"
         except Exception:
-            logging.info("🚀 YOLOv11n loaded (NCNN).")
-    else:
-        model = YOLO("yolo11n.pt")
-        logging.warning("⚠️  NCNN model not found, falling back to PyTorch.")
-    logging.info("🧠 YOLOv11n loaded.")
+            pass
+    logging.info(f"🧠 {_model_label} loaded.")
 
     cam = Picamera2()
     cam.configure(cam.create_video_configuration(main={"size": (1920, 1080)}))
@@ -1088,6 +1128,7 @@ def main():
     last_heartbeat = time.time()  # Prevents immediate heartbeat on startup
     last_forced_yolo = 0          # Timestamp of last periodic forced-YOLO run
     warmup_frame_count = 0        # MOG2 warmup: skip first 30 frames (no background model yet)
+    archive_persistence_count = 0 # Consecutive qualifying unclassified motion events (must reach ARCHIVE_PERSISTENCE_REQ to save)
 
     # Startup notification — rate-limited to prevent spam during rapid restarts/power cycles.
     # Only fires if the engine has been down for > 5 minutes (i.e., a real restart, not a crash loop).
@@ -1242,16 +1283,16 @@ def main():
                 if forced_yolo:
                     last_forced_yolo = now_mono
                     logging.debug("   🔎 Forced YOLO scan (lingerer check).")
-                # Adaptive confidence: more sensitive during quiet hours (11PM-6AM)
-                # when a missed detection is worse than a false positive
-                base_conf = 0.30 if is_quiet_hours() else 0.45
+                # Confidence threshold: 0.70 across all hours to minimize false positives.
+                # Previous adaptive scheme (0.30 quiet / 0.45 day) generated excessive noise.
+                base_conf = 0.70
                 frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                # Run YOLO at a lower baseline to catch everything, filter dynamic classes next
+                # Run YOLO at 0.70 baseline — only high-confidence detections pass through
                 results = model(frame_rgb, imgsz=1088, conf=base_conf, verbose=False)
 
                 # Dynamic Confidence Interval: Airborne objects require higher certainty
                 AIRBORNE_CLASSES = {"bird", "airplane", "kite"}
-                AIRBORNE_CONF_REQ = 0.55
+                AIRBORNE_CONF_REQ = 0.75
 
                 detected_classes = []
                 for i, cls_id in enumerate(results[0].boxes.cls):
@@ -1276,39 +1317,55 @@ def main():
                 )
 
                 if not detected_classes:
+                    # ── Unclassified motion: multi-frame persistence gate ─────────────
+                    # Problem: the old single-frame gate saved ~1,850 frames/day of ambient
+                    # motion (wind, shadows, light changes) — mostly useless for training.
+                    # Fix: require ARCHIVE_PERSISTENCE_REQ consecutive qualifying YOLO passes
+                    # before saving. Real subjects persist across frames; wind gusts don't.
                     now_mono_arc = time.time()
                     last_archive_save = getattr(main, '_last_archive_save', 0)
-                    if now_mono_arc - last_archive_save >= ARCHIVE_RATE_LIMIT_SECONDS:
-                        # ── Wind / ghost motion heuristics ────────────────────────────────
-                        # Wind creates: many scattered small blobs → low concentration ratio,
-                        # high Laplacian (sharp leaf/branch edges), but no cohesive subject.
-                        # Real (unclassifiable) subjects: large single blob, high concentration.
-                        #
-                        # Gate 1 — blob cohesion: largest_blob must be ≥ ARCHIVE_MIN_BLOB_PIXELS
-                        # Gate 2 — concentration: largest_blob / motion_pixels ≥ ARCHIVE_MIN_CONCENTRATION
-                        # Gate 3 — visual interest: Laplacian variance ≥ 250 (not blurry/dark)
-                        concentration = largest_blob / max(motion_pixels, 1)
-                        if largest_blob < ARCHIVE_MIN_BLOB_PIXELS:
-                            logging.debug(f"   Ghost motion (blob too small: {largest_blob:.0f}px²). Skipping archive.")
-                        elif concentration < ARCHIVE_MIN_CONCENTRATION:
-                            logging.debug(f"   Ghost motion (diffuse wind, conc={concentration:.2f}). Skipping archive.")
-                        else:
-                            gray = cv2.cvtColor(small_frame, cv2.COLOR_BGR2GRAY)
-                            visual_interest = cv2.Laplacian(gray, cv2.CV_64F).var()
-                            if visual_interest < 250:
-                                logging.debug(f"   Ghost motion (low visual interest: {visual_interest:.0f}). Skipping archive.")
-                            else:
-                                logging.info(f"   Ghost motion (interest={visual_interest:.0f}, blob={largest_blob:.0f}px², conc={concentration:.2f}). Archiving.")
-                                archive_dir = os.path.expanduser("~/rook-archive/unclassified")
-                                os.makedirs(archive_dir, exist_ok=True)
-                                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-                                small_save = cv2.resize(frame, (640, 360))
-                                cv2.imwrite(os.path.join(archive_dir, f"unclassified_{ts}.jpg"), small_save)
-                                main._last_archive_save = now_mono_arc
+                    concentration = largest_blob / max(motion_pixels, 1)
+                    # Spatial heuristics: blob size, concentration, visual interest
+                    qualifies = (largest_blob >= ARCHIVE_MIN_BLOB_PIXELS
+                                 and concentration >= ARCHIVE_MIN_CONCENTRATION)
+                    if qualifies:
+                        gray = cv2.cvtColor(small_frame, cv2.COLOR_BGR2GRAY)
+                        visual_interest = cv2.Laplacian(gray, cv2.CV_64F).var()
+                        qualifies = visual_interest >= 250
+                    if qualifies:
+                        archive_persistence_count += 1
+                        logging.debug(f"   Unclassified motion qualifies (blob={largest_blob:.0f}px², "
+                                      f"conc={concentration:.2f}, persist={archive_persistence_count}/"
+                                      f"{ARCHIVE_PERSISTENCE_REQ}).")
                     else:
-                        logging.debug("   Ghost motion (rate-limited, skipping save).")
+                        # Failed spatial gates — reset persistence (not a real subject)
+                        if archive_persistence_count > 0:
+                            logging.debug(f"   Persistence reset (spatial gates failed after {archive_persistence_count} hits).")
+                        archive_persistence_count = 0
+
+                    # Only archive when persistence threshold met AND rate limiter allows
+                    if (archive_persistence_count >= ARCHIVE_PERSISTENCE_REQ
+                            and now_mono_arc - last_archive_save >= ARCHIVE_RATE_LIMIT_SECONDS):
+                        logging.info(f"   📸 Persistent unclassified motion archived "
+                                     f"(blob={largest_blob:.0f}px², conc={concentration:.2f}, "
+                                     f"persist={archive_persistence_count}).")
+                        archive_dir = os.path.expanduser("~/rook-archive/unclassified")
+                        os.makedirs(archive_dir, exist_ok=True)
+                        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                        small_save = cv2.resize(frame, (640, 360))
+                        cv2.imwrite(os.path.join(archive_dir, f"unclassified_{ts}.jpg"), small_save)
+                        main._last_archive_save = now_mono_arc
+                        archive_persistence_count = 0  # Reset after save
+                    elif now_mono_arc - last_archive_save < ARCHIVE_RATE_LIMIT_SECONDS:
+                        logging.debug("   Unclassified motion (rate-limited, skipping save).")
                     time.sleep(0.15)
                     continue
+
+                # ── Classified detection: reset archive persistence counter ────
+                # A real YOLO detection means the scene has a classifiable subject.
+                # Any preceding unclassified persistence streak was likely approach
+                # frames of this same subject — not worth archiving separately.
+                archive_persistence_count = 0
 
                 # ── Update daily stats ─────────────────────────────────────
                 daily_stats["total_events"] += 1
