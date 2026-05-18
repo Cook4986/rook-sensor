@@ -251,6 +251,17 @@ Create `~/rook-env/.env`:
 # ── Notification channels ──
 SLACK_WEBHOOK_URL=https://hooks.slack.com/...
 NOTIFY_EMAIL=you@example.com
+NOTIFY_TO_NUMBER=+15551234567
+
+# OPT-IN CONSENT: By entering your NOTIFY_TO_NUMBER above, you consent to receive 
+# automated SMS alerts from your device. Message frequency varies. Message and data 
+# rates may apply. Reply STOP to cancel. Terms: https://github.com/Cook4986/rook-sensor/blob/main/TERMS.md 
+# Privacy: https://github.com/Cook4986/rook-sensor/blob/main/PRIVACY.md
+
+# ── Twilio (Required for SMS) ──
+TWILIO_ACCOUNT_SID=AC...
+TWILIO_AUTH_TOKEN=...
+TWILIO_FROM_NUMBER=+15559876543
 
 # ── SMTP (Gmail app password recommended) ──
 SMTP_SERVER=smtp.gmail.com
