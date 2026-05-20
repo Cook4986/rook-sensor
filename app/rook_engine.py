@@ -709,8 +709,15 @@ def append_day_to_stats_db(day_stats: dict, day_label: str,
                             best_score: int, best_summary: str):
     """Append yesterday's totals and update all-time records. Called at midnight rollover."""
     db = load_stats_db()
+    try:
+        import datetime as dt
+        iso_date = dt.datetime.strptime(day_label, "%A, %B %d %Y").strftime("%Y-%m-%d")
+    except Exception:
+        iso_date = ""
+        
     entry = {
         "date": day_label,
+        "date_iso": iso_date,
         "traffic":      day_stats.get("traffic", 0),
         "pedestrians":  day_stats.get("pedestrians", 0),
         "animals":      day_stats.get("animals", 0),
@@ -761,7 +768,17 @@ def send_daily_digest(notify_email, best_image_data, daily_stats, beast_cam_toda
 
         def _window(days: int) -> dict:
             cutoff = (today_dt - _td(days=days)).strftime("%Y-%m-%d")
-            rows = [r for r in history if r.get("date", "") >= cutoff]
+            rows = []
+            for r in history:
+                iso = r.get("date_iso")
+                if not iso:
+                    try:
+                        import datetime as dt
+                        iso = dt.datetime.strptime(r.get("date", ""), "%A, %B %d %Y").strftime("%Y-%m-%d")
+                    except Exception:
+                        iso = "1970-01-01"
+                if iso >= cutoff:
+                    rows.append(r)
             t = {"traffic": 0, "pedestrians": 0, "animals": 0, "deliveries": 0, "total_events": 0}
             for r in rows:
                 for k in t:
@@ -1367,17 +1384,21 @@ def main():
                 # frames of this same subject — not worth archiving separately.
                 archive_persistence_count = 0
 
-                # ── Update daily stats ─────────────────────────────────────
-                daily_stats["total_events"] += 1
-                for cls in set(detected_classes):
-                    if cls in TRAFFIC_CLASSES:
-                        daily_stats["traffic"] += 1
-                    if cls in PEDESTRIAN_CLASSES:
-                        daily_stats["pedestrians"] += 1
-                    if cls in ANIMAL_CLASSES:
-                        daily_stats["animals"] += 1
-                    if cls in DELIVERY_CLASSES:
-                        daily_stats["deliveries"] += 1
+                # ── Update daily stats (Event-based) ───────────────────────
+                # Count an event when a class newly appears in the scene to accurately
+                # track all non-notification events without inflating per-frame counts.
+                new_classes = set(detected_classes) - set(last_detected_classes)
+                if new_classes:
+                    daily_stats["total_events"] += 1
+                    for cls in new_classes:
+                        if cls in TRAFFIC_CLASSES:
+                            daily_stats["traffic"] += 1
+                        if cls in PEDESTRIAN_CLASSES:
+                            daily_stats["pedestrians"] += 1
+                        if cls in ANIMAL_CLASSES:
+                            daily_stats["animals"] += 1
+                        if cls in DELIVERY_CLASSES:
+                            daily_stats["deliveries"] += 1
 
                 # ── Beast Cam: cache wildlife crops (async, non-blocking) ──
                 wildlife_in_frame = [c for c in detected_classes if c in WILDLIFE_CLASSES]
