@@ -155,6 +155,31 @@ Alerts use a score-adaptive cooldown to prevent spam:
 - Low-priority events (score ~8): **52-second** cooldown
 - Redundant scenes (same classes as last alert) are always skipped
 
+### SMS — Opt-In & Compliance
+
+> The canonical, single-page opt-in disclosure for Rook's Twilio A2P 10DLC campaign lives at **[`docs/SMS_COMPLIANCE.md`](docs/SMS_COMPLIANCE.md)**. The summary below is reproduced from that page.
+
+**Who can receive SMS from a Rook deployment?** Exactly one person: the **device owner** who installs the software, provisions the Twilio sender, and runs the Pi. Rook is a personal-use, open-source IoT sensor — there is no signup form, no customer list, and no mechanism for enrolling anyone other than the deployer themselves. Entering a third party's number is a violation of these terms and of Twilio's A2P 10DLC policy.
+
+**How is consent collected?** Self-enrollment via local configuration. After cloning the repo and running `setup_pi.sh`, the device owner edits `~/rook-env/.env` on their own Raspberry Pi and writes their **own** mobile number into the `NOTIFY_TO_NUMBER` field (see [§4 Configure Environment](#4-configure-environment) for the exact disclosure shown at the moment of entry). The disclosure block in that section — visible in this public repository **before** any number is entered — names the program, message types, frequency, cost disclosure, opt-out keywords/methods, help keyword, and links to Privacy & Terms. Saving the file and starting the `rook.service` systemd unit constitutes the device owner's express written consent to receive SMS from their own device.
+
+**Program details (required A2P disclosures):**
+
+| Field | Value |
+|---|---|
+| Program name | Rook Sensor Alerts |
+| Brand type | Sole Proprietor (single device owner / single recipient) |
+| Message types | Emoji-based yard activity alerts, thermal warnings, system status |
+| Marketing? | **No.** Marketing messages are never sent. |
+| Message frequency | Variable, activity-driven. Typically **0–20 messages/day**. |
+| Cost | **Message and data rates may apply** (per your mobile carrier). |
+| Opt-out keywords | STOP, STOPALL, UNSUBSCRIBE, CANCEL, END, QUIT (Twilio default) |
+| Opt-out (additional) | Remove `NOTIFY_TO_NUMBER` from `~/rook-env/.env` and restart the service, **or** power off the device. |
+| Help keywords | HELP, INFO (Twilio default) |
+| Third-party sharing | **None.** Mobile numbers are not shared with third parties or affiliates for marketing or promotional purposes. See [PRIVACY.md](PRIVACY.md). |
+| Privacy Policy | <https://github.com/Cook4986/rook-sensor/blob/main/PRIVACY.md> |
+| Terms & Conditions | <https://github.com/Cook4986/rook-sensor/blob/main/TERMS.md> |
+
 ---
 
 ## Scene Intelligence
@@ -245,18 +270,36 @@ chmod +x setup_pi.sh && ./setup_pi.sh
 
 ### 4. Configure Environment
 
+> #### SMS Opt-In & Consent (please read before adding `NOTIFY_TO_NUMBER`)
+>
+> **Program:** Rook Sensor Alerts (operated by the device owner under a Twilio A2P 10DLC Sole Proprietor campaign).
+>
+> **Single recipient, self-enrollment only.** Rook is a personal-use, open-source IoT device. The *only* phone number eligible to receive SMS from a Rook deployment is the **device owner's own mobile number** — i.e., the same person who installs the software, configures the Pi, and provisions the Twilio sender. You may **not** enter anyone else's number. By entering your own mobile number in `NOTIFY_TO_NUMBER` below and starting the service, you (the device owner) provide express written consent to receive automated SMS alerts from your own Rook device.
+>
+> - **Message types:** Emoji-based detection alerts (e.g., `📦🚚`, `🦅`), thermal warnings, and system status. **No marketing.**
+> - **Message frequency:** Variable, driven by yard activity. Typically **0–20 messages/day**.
+> - **Cost:** Message and data rates may apply (per your mobile carrier).
+> - **Opt-out:** Reply **STOP** to any Rook message, **or** remove `NOTIFY_TO_NUMBER` from this `.env` file and restart the service, **or** power off the device.
+> - **Help:** Reply **HELP** to any Rook message.
+> - **Privacy:** Your mobile number is **not** shared with third parties or affiliates for marketing or promotional purposes. See [PRIVACY.md](PRIVACY.md).
+> - **Terms:** See [TERMS.md](TERMS.md).
+>
+> *Canonical disclosure: [`docs/SMS_COMPLIANCE.md`](docs/SMS_COMPLIANCE.md). The block above mirrors that page and is referenced by Rook's Twilio A2P 10DLC campaign registration.*
+
 Create `~/rook-env/.env`:
 
 ```bash
 # ── Notification channels ──
 SLACK_WEBHOOK_URL=https://hooks.slack.com/...
 NOTIFY_EMAIL=you@example.com
-NOTIFY_TO_NUMBER=+15551234567
 
-# OPT-IN CONSENT: By entering your NOTIFY_TO_NUMBER above, you consent to receive 
-# automated SMS alerts from your device. Message frequency varies. Message and data 
-# rates may apply. Reply STOP to cancel. Terms: https://github.com/Cook4986/rook-sensor/blob/main/TERMS.md 
+# NOTIFY_TO_NUMBER: enter ONLY your own mobile number (E.164, e.g. +15551234567).
+# By entering it here you (the device owner) consent to receive automated SMS
+# from Rook Sensor Alerts. Msg freq varies (0–20/day typical). Msg & data rates
+# may apply. Reply STOP to cancel, HELP for help. No marketing. No third-party
+# sharing. Terms: https://github.com/Cook4986/rook-sensor/blob/main/TERMS.md
 # Privacy: https://github.com/Cook4986/rook-sensor/blob/main/PRIVACY.md
+NOTIFY_TO_NUMBER=+15551234567
 
 # ── Twilio (Required for SMS) ──
 TWILIO_ACCOUNT_SID=AC...
