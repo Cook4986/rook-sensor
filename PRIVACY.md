@@ -63,7 +63,7 @@ Standard message and data rates from your mobile carrier may apply. Carriers are
 
 ## Data Storage
 
-- **On-device:** No persistent image or video storage. The SD card contains only the OS, application code, and configuration. `/tmp` and `/var/log` are RAM disks (tmpfs), cleared on every reboot.
+- **On-device:** No video storage. The SD card contains the OS, application code, configuration, and a rate-limited training archive of still frames (`~/rook-archive/`): motion frames YOLO could not classify, and event-sampled frames with confirmed detections (640×360, with detection-class metadata). Archive frames are synced to the owner's private storage and deleted from the device within 7 days. `/tmp` and `/var/log` are RAM disks (tmpfs), cleared on every reboot.
 - **Beast Cam cache:** Wildlife bounding-box crops are stored temporarily in `~/beast_cam/YYYY-MM-DD/` and deleted from the device immediately after the nightly digest email is confirmed sent.
 - **Cloud (optional, not yet implemented):** A future dashboard feature may store anonymized event metadata in a Supabase Postgres database under the owner's account.
 
@@ -77,6 +77,18 @@ Standard message and data rates from your mobile carrier may apply. Carriers are
 | **Open-Meteo** | Weather context (read-only API) | Device IP, GPS bounding box from configured coordinates |
 | **iNaturalist API** | Local species context (read-only) | Configured latitude/longitude |
 | **Tailscale** | Secure remote SSH (VPN) | Device hostname, encrypted IP tunnel |
+| **LLM API** (optional, owner-configured) | Offline auto-labeling of the owner's archive for model training | Image crops of detected objects (vehicles, wildlife, uniformed players) and whole archived frames (640×360) from the owner's own archive |
+
+### LLM Auto-Labeling (optional, off-device)
+
+The optional training pipeline (`app/llm_autolabel.py`) can send **cropped detections from the owner's own archive** to a vision LLM API the owner configures (e.g., OpenAI, or a fully local model via Ollama/vLLM) to assign fine-grained labels for model training. This tool:
+
+- Runs **only on the owner's computer**, only when the owner invokes it — never on the Pi, never in the real-time detection path
+- Is **opt-in**: if no `LLM_API_KEY` is configured, no data is sent anywhere
+- Sends object crops (vehicles, wildlife) and, for frames where the detector found nothing, whole archived frames (640×360) — all from imagery the owner already possesses in their private archive
+- Can be pointed at a **self-hosted LLM endpoint** for a fully offline workflow
+
+The device's core privacy posture is unchanged: no cloud inference, no video storage, frames exist only in RAM during live operation.
 
 ## GDPR / CCPA
 

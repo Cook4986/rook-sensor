@@ -34,6 +34,7 @@ ARCHIVE_RATE_LIMIT_SECONDS = 600  # Minimum seconds between unclassified frame s
 ARCHIVE_MIN_BLOB_PIXELS    = 800  # Cohesive blob must be ≥ this area (px²) — raised from 500 to reject marginal foliage blobs
 ARCHIVE_MIN_CONCENTRATION  = 0.40 # largest_blob / motion_pixels ratio — tightened from 0.35; wind is diffuse (~0.1–0.2), real subjects ≥0.40
 ARCHIVE_PERSISTENCE_REQ    = 2    # Must trigger on N consecutive qualifying YOLO passes before archiving — filters one-off wind gusts
+CLASSIFIED_RATE_LIMIT_SECONDS = 600  # Min seconds between classified-detection frame saves — samples confirmed detections for training (docs/llm_autolabel_pipeline.md)
 DIGEST_HOUR = 3                 # 3 AM — mathematically least-active hour, minimizes missed captures
 HEARTBEAT_INTERVAL = 6 * 3600  # Slack heartbeat every 6 hours (confirms system alive)
 LOG_FILE = os.path.expanduser("~/rook.log")
@@ -68,6 +69,25 @@ EMOJI_MAP = {
     "bus": "🚌", "truck": "🚚", "boat": "⛵", "airplane": "✈️",
     # Wildlife (relevant urban/suburban)
     "dog": "🐕", "cat": "🐈", "bird": "🦅", "bear": "🐻", "horse": "🐎",
+    # Custom classes (IDs 80+, fine-tuned model — see docs/llm_autolabel_pipeline.md).
+    # Inert when the base 80-class COCO model is loaded: these names never appear
+    # in detections, so all custom-class maps below are no-ops until a custom
+    # model is deployed via deploy_model_to_pi.sh.
+    # Vehicles — municipal / delivery / school / emergency
+    "trash_truck": "🗑️", "street_sweeper": "🧹",
+    "ups_truck": "🟫", "fedex_truck": "🟪", "amazon_van": "📦",
+    "usps_truck": "📮", "dhl_van": "🟨",
+    "school_bus": "🚸", "police_car": "🚓", "fire_truck": "🚒", "ambulance": "🚑",
+    # People
+    "baseball_player": "🧢",
+    # Wildlife — specific local species (coyote/deer/cardinal etc. were previously
+    # heuristic-only: 🐺⚠️ solo-dog proxy, 🦌 sheep/cow remap, HSV bird colors)
+    "coyote": "🐺", "fox": "🦊", "deer": "🦌", "raccoon": "🦝",
+    "opossum": "🐀", "skunk": "🦨", "squirrel": "🐿️", "rabbit": "🐇",
+    "wild_turkey": "🦃", "canada_goose": "🪿", "raptor": "🦅",
+    "cardinal": "🔴🐦", "blue_jay": "🔵🐦",
+    # Natural phenomena — anomaly composites per vocabulary philosophy
+    "downed_tree": "🌳⚠️", "smoke": "🔥💨", "flood": "🌊",
 }
 
 
@@ -107,17 +127,64 @@ SCORE_MAP = {
     "horse":       8,
     # ─ Critical ───────────────────────────────────────────────────────────────
     "bear":      100,
-    # ─ Custom training targets (requires fine-tuned model — see training plan) ──
-    # "trash_truck":    15,   # Municipal: high recurrence cadence, contextual AM timing
-    # "ups_truck":      12,   # Delivery: UPS brown livery
-    # "fedex_truck":    12,   # Delivery: FedEx purple/orange or white
-    # "amazon_van":     12,   # Delivery: Amazon blue Sprinter/Transit Connect
-    # "baseball_player": 8,  # Custom: uniform + equipment
-    # "baseball_game":  50,   # Aggregate: crowd + uniforms + equipment (congregation event)
+    # ─ Custom classes (fine-tuned model, IDs 80+ — see docs/llm_autolabel_pipeline.md) ──
+    # Vehicles
+    "trash_truck":    15,   # Municipal: high recurrence cadence, contextual AM timing
+    "street_sweeper": 15,   # Municipal: rare, scheduled
+    "ups_truck":      12,   # Delivery: UPS brown livery
+    "fedex_truck":    12,   # Delivery: FedEx purple/orange or white
+    "amazon_van":     12,   # Delivery: Amazon blue Sprinter/Transit Connect
+    "usps_truck":     12,   # Mail: USPS white LLV, blue eagle
+    "dhl_van":        12,   # Delivery: DHL yellow
+    "school_bus":     10,   # Scheduled, but confirms school-run windows
+    "police_car":     30,   # Emergency: see emergency floor in calculate_image_score
+    "fire_truck":     40,   # Emergency
+    "ambulance":      40,   # Emergency
+    # People
+    "baseball_player": 8,   # Custom: uniform + equipment
+    # "baseball_game" is not a detector class — it's a congregation heuristic:
+    # 3+ baseball_player detections floor the score at 50 (see calculate_image_score).
+    # Wildlife — confirmed species outrank the generic COCO classes they refine
+    "coyote":         40,   # Replaces the solo-dog-at-quiet-hours proxy when model is live
+    "fox":            30,
+    "deer":           50,   # Matches the sheep/cow→deer heuristic score
+    "raccoon":        20,
+    "opossum":        15,
+    "skunk":          25,
+    "squirrel":        3,   # Ubiquitous — silent solo, daily-stats only
+    "rabbit":          5,   # Common — silent solo
+    "wild_turkey":    25,
+    "canada_goose":   15,
+    "raptor":         20,   # Confirmed bird of prey > generic bird (10)
+    "cardinal":       12,
+    "blue_jay":       12,
+    # Natural phenomena
+    "downed_tree":    40,   # Storm damage — actionable
+    "smoke":         100,   # Critical — fire risk, immediate alert (like bear)
+    "flood":          80,   # Critical — property risk
 }
 
+# ── Custom Detection Vocabulary (fine-tuned model only) ──────────────────────
+# Fine-grained local classes appended to COCO as IDs 80+ by the LLM auto-label
+# pipeline (docs/llm_autolabel_pipeline.md). The class list is the contract shared
+# with llm_autolabel.py / train_custom_model.py. With the stock COCO model these
+# names never occur, so every reference below is a silent no-op.
+CUSTOM_DELIVERY_CLASSES  = {"ups_truck", "fedex_truck", "amazon_van",
+                            "usps_truck", "dhl_van"}
+CUSTOM_MUNICIPAL_CLASSES = {"trash_truck", "street_sweeper", "school_bus"}
+CUSTOM_EMERGENCY_CLASSES = {"police_car", "fire_truck", "ambulance"}
+CUSTOM_WILDLIFE_CLASSES  = {"coyote", "fox", "deer", "raccoon", "opossum",
+                            "skunk", "squirrel", "rabbit", "wild_turkey",
+                            "canada_goose", "raptor", "cardinal", "blue_jay"}
+CUSTOM_PHENOMENA_CLASSES = {"downed_tree", "smoke", "flood"}
+CUSTOM_CLASSES = (CUSTOM_DELIVERY_CLASSES | CUSTOM_MUNICIPAL_CLASSES
+                  | CUSTOM_EMERGENCY_CLASSES | CUSTOM_WILDLIFE_CLASSES
+                  | CUSTOM_PHENOMENA_CLASSES | {"baseball_player"})
+
 # ── Daily Stats Category Membership ──────────────────────────────────────────
-TRAFFIC_CLASSES    = {"car", "truck", "bus", "motorcycle", "bicycle"}
+TRAFFIC_CLASSES    = ({"car", "truck", "bus", "motorcycle", "bicycle"}
+                      | CUSTOM_DELIVERY_CLASSES | CUSTOM_MUNICIPAL_CLASSES
+                      | CUSTOM_EMERGENCY_CLASSES)
 
 # Classes fully suppressed from detection — not present in this scene and cause misclassification noise.
 # "train"          🚂  No rail infrastructure nearby — boxy dark vehicle misclassification.
@@ -156,13 +223,15 @@ LINGER_EMOJI = {
     "bicycle":    "🚲🔒",   # Unattended bicycle
     "person":     "🚶⏱️",   # Loitering individual / group
 }
-PEDESTRIAN_CLASSES = {"person"}
-ANIMAL_CLASSES     = {"bird", "dog", "cat", "bear", "horse"}
-DELIVERY_CLASSES   = {"truck"}
-WILDLIFE_CLASSES   = ANIMAL_CLASSES
+PEDESTRIAN_CLASSES = {"person", "baseball_player"}
+ANIMAL_CLASSES     = {"bird", "dog", "cat", "bear", "horse"} | CUSTOM_WILDLIFE_CLASSES
+DELIVERY_CLASSES   = {"truck"} | CUSTOM_DELIVERY_CLASSES
+WILDLIFE_CLASSES   = ANIMAL_CLASSES   # Beast Cam crops now include confirmed species
 
-# Classes silenced when appearing solo (background noise)
-SILENT_SOLO_CLASSES = {"car", "bicycle", "horse"}
+# Classes silenced when appearing solo (background noise).
+# Squirrels and rabbits are ubiquitous yard wildlife — counted in daily stats
+# (and Beast Cam crops still cached) but never worth a real-time alert alone.
+SILENT_SOLO_CLASSES = {"car", "bicycle", "horse", "squirrel", "rabbit"}
 
 
 # ── Scene Fixture Filter ──────────────────────────────────────────────────────
@@ -439,6 +508,20 @@ def translate_to_emoji_summary(detected_classes, motion_pixels=0, frame_bgr=None
     night = not is_daytime()
     quiet = is_quiet_hours()
 
+    # Emergency responders (custom model): 🚨 composite per vocabulary spec.
+    for _cls, _sym in (("police_car", "🚨🚓"), ("fire_truck", "🚨🚒"),
+                       ("ambulance", "🚨🚑")):
+        if counts.get(_cls, 0) > 0:
+            summary.append(_sym)
+            counts[_cls] = 0
+
+    # Baseball game (custom model): 3+ uniformed players = organized game.
+    # Fires before the generic crowd heuristics so a game isn't reported as 🏟️.
+    if counts.get("baseball_player", 0) >= 3:
+        summary.append("⚾🏟️")
+        counts["baseball_player"] = 0
+        counts["person"] = 0   # remaining persons are spectators/umpires — implied
+
     # Large crowd
     if counts.get("person", 0) >= 5:
         summary.append("🏟️")   # Rally / incident
@@ -589,10 +672,24 @@ def calculate_image_score(detected_classes, weather_bonus: int = 0):
         score += 10   # Small gathering
         score = max(score, 30)
 
-    heavy = counts.get("truck", 0) + counts.get("bus", 0)
+    heavy = (counts.get("truck", 0) + counts.get("bus", 0)
+             + sum(counts.get(c, 0) for c in CUSTOM_DELIVERY_CLASSES)
+             + sum(counts.get(c, 0) for c in CUSTOM_MUNICIPAL_CLASSES))
     if heavy >= 1:
         score += 20   # Multiple heavy vehicles: fire response, utility, crash
         score = max(score, 30)
+
+    # Emergency responders (custom model): always the "rare/critical" tier —
+    # matches the 🚨🚓 event in docs/emoji_vocabulary.md.
+    if any(counts.get(c, 0) > 0 for c in CUSTOM_EMERGENCY_CLASSES):
+        score += 20
+        score = max(score, 50)
+
+    # Baseball game congregation (custom model): 3+ uniformed players = organized
+    # game, the "rare/critical" tier per docs/emoji_vocabulary.md alert scoring.
+    if counts.get("baseball_player", 0) >= 3:
+        score += 20
+        score = max(score, 50)
 
     # Unaccompanied animals
     for animal in ["dog", "cat", "bear", "horse"]:
@@ -1096,6 +1193,16 @@ def main():
             _model_label += ", 3 threads"
         except Exception:
             pass
+    # Detect whether the loaded model carries the custom local vocabulary
+    # (fine-tuned via the LLM auto-label pipeline) or is the stock 80-class COCO
+    # model. Logged for diagnostics and surfaced to the future v2 dashboard.
+    try:
+        _model_classes = set(model.names.values())
+    except Exception:
+        _model_classes = set()
+    _custom_active = sorted(CUSTOM_CLASSES & _model_classes)
+    if _custom_active:
+        _model_label += f" +custom[{','.join(_custom_active)}]"
     logging.info(f"🧠 {_model_label} loaded.")
 
     cam = Picamera2()
@@ -1399,6 +1506,34 @@ def main():
                             daily_stats["animals"] += 1
                         if cls in DELIVERY_CLASSES:
                             daily_stats["deliveries"] += 1
+
+                # ── Classified-detection archive: sample confirmed detections ──
+                # Counterpart of the unclassified archive: raw frames where the
+                # Pi DID detect something at deployment confidence (0.70). These
+                # are hard positives of existing classes from this exact scene —
+                # the auto-label pipeline uses them to refine base classes and
+                # to mine vendor/species subclasses from confirmed parents.
+                # Sampled on new-class events (same signal as daily stats) with
+                # a rate limit; a JSON sidecar records the Pi's verdict as a
+                # weak label so the Mac side can audit Pi-vs-teacher agreement.
+                if new_classes:
+                    now_cls = time.time()
+                    if now_cls - getattr(main, '_last_classified_save', 0) >= CLASSIFIED_RATE_LIMIT_SECONDS:
+                        try:
+                            cls_dir = os.path.expanduser("~/rook-archive/classified")
+                            os.makedirs(cls_dir, exist_ok=True)
+                            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                            # Raw frame, NOT the annotated plot — drawn boxes would poison training
+                            cv2.imwrite(os.path.join(cls_dir, f"classified_{ts}.jpg"),
+                                        cv2.resize(frame, (640, 360)))
+                            with open(os.path.join(cls_dir, f"classified_{ts}.json"), "w") as f:
+                                json.dump({"pi_classes": detected_classes,
+                                           "new_classes": sorted(new_classes),
+                                           "ts": ts}, f)
+                            main._last_classified_save = now_cls
+                            logging.debug(f"   📸 Classified frame archived ({sorted(new_classes)}).")
+                        except Exception as e:
+                            logging.warning(f"Classified archive save failed: {e}")
 
                 # ── Beast Cam: cache wildlife crops (async, non-blocking) ──
                 wildlife_in_frame = [c for c in detected_classes if c in WILDLIFE_CLASSES]

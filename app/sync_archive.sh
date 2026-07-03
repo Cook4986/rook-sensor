@@ -43,8 +43,10 @@ echo "========================================"
 
 # ── Ensure directories ─────────────────────────────────────────
 mkdir -p "$STAGING_DIR/unclassified"
+mkdir -p "$STAGING_DIR/classified"
 mkdir -p "$STAGING_DIR/beast_cam"
 mkdir -p "$DROPBOX_ARCHIVE/unclassified"
+mkdir -p "$DROPBOX_ARCHIVE/classified"
 mkdir -p "$DROPBOX_ARCHIVE/beast_cam"
 
 # ── Connectivity check ─────────────────────────────────────────
@@ -58,12 +60,13 @@ sync_dir() {
     local REMOTE_DIR="$1"
     local LOCAL_DIR="$2"
     local LABEL="$3"
+    local PATTERN="${4:-*.jpg}"   # optional glob — classified/ also carries .json sidecars
 
     echo "── $LABEL ──"
 
     # Get list of files on Pi
     REMOTE_FILES=$(ssh $SSH_OPTS "$PI_USER@$PI_HOST" \
-        "find $REMOTE_DIR -maxdepth 1 -name '*.jpg' -printf '%f\n' 2>/dev/null || ls $REMOTE_DIR/*.jpg 2>/dev/null | xargs -I{} basename {}" 2>/dev/null || true)
+        "find $REMOTE_DIR -maxdepth 1 -name '$PATTERN' -printf '%f\n' 2>/dev/null || ls $REMOTE_DIR/$PATTERN 2>/dev/null | xargs -I{} basename {}" 2>/dev/null || true)
 
     if [ -z "$REMOTE_FILES" ]; then
         echo "   No files found on Pi in $REMOTE_DIR"
@@ -118,11 +121,15 @@ sync_beast_cam() {
 
 # ── Execute syncs ──────────────────────────────────────────────
 sync_dir "~/rook-archive/unclassified" "$STAGING_DIR/unclassified" "Unclassified frames"
+sync_dir "~/rook-archive/classified"   "$STAGING_DIR/classified"   "Classified frames"
+sync_dir "~/rook-archive/classified"   "$STAGING_DIR/classified"   "Classified sidecars" "*.json"
 sync_beast_cam
 
 # ── Stage → Dropbox (cp inherits user FDA permissions) ─────────
 echo "── Copying staging → Dropbox ──"
 cp -n "$STAGING_DIR/unclassified/"*.jpg "$DROPBOX_ARCHIVE/unclassified/" 2>/dev/null || true
+cp -n "$STAGING_DIR/classified/"*.jpg  "$DROPBOX_ARCHIVE/classified/" 2>/dev/null || true
+cp -n "$STAGING_DIR/classified/"*.json "$DROPBOX_ARCHIVE/classified/" 2>/dev/null || true
 
 # Beast Cam: copy each date dir
 for dir in "$STAGING_DIR/beast_cam"/20*/; do

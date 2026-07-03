@@ -402,6 +402,7 @@ Rook archives two categories of images on the Pi for downstream model training a
 | Archive | Path on Pi | Content |
 |---|---|---|
 | **Unclassified motion** | `~/rook-archive/unclassified/` | Frames where MOG2 detected motion but YOLO found nothing. Gated by a multi-frame persistence filter. |
+| **Classified detections** | `~/rook-archive/classified/` | Raw frames where YOLO confirmed detections, sampled on new-class events (10-min rate limit) with a JSON sidecar of the Pi's verdict. Refines existing classes in training. |
 | **Beast Cam** | `~/beast_cam/` | Cropped wildlife detections (birds, animals). Auto-purged after 7 days. |
 
 ### Sync to Mac (launchd)
@@ -444,21 +445,25 @@ python3 app/reclassify_archive.py --slack      # send Slack digest of findings
 ```bash
 # Clear old files on the Pi to free SD card space
 ssh rook@rook.local "find ~/rook-archive/unclassified/ -name '*.jpg' -mtime +7 -delete"
+ssh rook@rook.local "find ~/rook-archive/classified/ \( -name '*.jpg' -o -name '*.json' \) -mtime +7 -delete"
 ssh rook@rook.local "find ~/beast_cam/ -name '*.jpg' -mtime +7 -delete"
 ssh rook@rook.local "df -h ~"   # verify space freed
 ```
 
 ---
 
-## Custom Model Training
+## Custom Model Training — LLM Auto-Label Pipeline
 
-The base YOLO26n model covers 80 COCO classes but cannot distinguish site-specific objects (Amazon van vs. generic truck, trash truck vs. delivery). See [`rook_custom_model_proposal.md`](rook_custom_model_proposal.md) for the full pipeline:
+The base YOLO26n model covers 80 COCO classes but cannot distinguish site-specific objects (Amazon van vs. generic truck, trash truck vs. delivery). Rook extends the model using the **unclassified archive as training data**, with **zero manual annotation** — a teacher detector draws the boxes and a vision LLM assigns fine-grained local labels. Full design: [`docs/llm_autolabel_pipeline.md`](docs/llm_autolabel_pipeline.md).
 
-1. **Data mining** — Unclassified archive + Beast Cam crops provide training data
-2. **Annotation** — Roboflow or CVAT for bounding box labeling (target: 300–500 samples per class)
-3. **Fine-tuning** — Transfer learning on `yolo26n.pt` with `imgsz=1088` to match deployment resolution
-4. **NCNN export** — Required to maintain ~150ms inference on the Pi's CPU
-5. **Integration** — Add new classes to `SCORE_MAP`, `EMOJI_MAP`, and scene heuristics
+1. **Data mining** — automatic: `archive/unclassified/` + `archive/reclassified/` supply subjects the Pi missed (recall), `archive/classified/` supplies Pi-confirmed detections that refine existing classes (precision), and `archive/processed/` provides hard-negative background frames
+2. **Auto-labeling** — `python3 app/llm_autolabel.py`: YOLO26l/x proposes boxes at conf 0.20, then a vision LLM classifies crops into a 28-class local vocabulary — vendor delivery vans (UPS/FedEx/Amazon/USPS/DHL), municipal vehicles (trash truck, street sweeper, school bus), emergency responders, specific wildlife (coyote, fox, deer, raccoon, raptor, cardinal, ...), and `baseball_player` (closed vocabulary, confidence-gated, content-hash cached so each crop is billed once). Frames where the detector found nothing get a **whole-frame screening pass** for missed wildlife and natural phenomena (`downed_tree`, `smoke`, `flood`)
+3. **Fine-tuning** — `python3 app/train_custom_model.py`: transfer learning on `yolo26n.pt` at `imgsz=1088`, with a **release gate** (custom-class mAP minimum + base-class non-regression) before export
+4. **NCNN export** — automatic on gate pass; required to maintain ~150ms inference on the Pi's CPU
+5. **Deployment** — `bash app/deploy_model_to_pi.sh`: versioned push, atomic symlink swap, health check, automatic rollback, `🧠🔄` Slack notice
+6. **Integration** — custom classes are already wired into `SCORE_MAP`, `EMOJI_MAP`, and scene heuristics; they are inert until a custom model is deployed
+
+> The original manually-annotated plan (Roboflow/CVAT) is preserved in [`rook_custom_model_proposal.md`](rook_custom_model_proposal.md); its annotation step is superseded by the LLM pipeline.
 
 ---
 
@@ -478,9 +483,12 @@ rook-sensor/
 │   ├── rook_weather.py                # Weather enrichment module
 │   ├── frame_test.py                  # Single-frame diagnostic tool
 │   ├── reclassify_archive.py          # Mac-side re-inference with larger model
+│   ├── llm_autolabel.py               # LLM auto-labeling: archive → YOLO dataset
+│   ├── train_custom_model.py          # Fine-tune + release gate + NCNN export
+│   ├── deploy_model_to_pi.sh          # Versioned model push with rollback
 │   ├── thermal_stress_test.py         # SoC thermal validation
 │   ├── setup_pi.sh                    # Pi first-boot setup script
-│   ├── deploy_to_pi.sh               # Mac → Pi deployment script
+│   ├── deploy_to_pi.sh               # Mac → Pi deployment script (scripts only)
 │   ├── sync_archive.sh               # Pi → Mac archive sync (scp-based)
 │   └── com.rook.sync.plist            # macOS launchd agent for sync scheduling
 │
@@ -494,6 +502,7 @@ rook-sensor/
 └── docs/
     ├── camera_calibration.md          # IMX462 tuning notes
     ├── emoji_vocabulary.md            # Extended emoji reference
+    ├── llm_autolabel_pipeline.md      # LLM auto-label pipeline design + spec conformance
     └── refinements.md                 # Historical engineering decisions
 ```
 

@@ -18,6 +18,24 @@ Rook translates yard activity into a compact emoji vocabulary. No video is trans
 
 > **Suppressed classes:** `train` (🚂) is fully ignored at the detection stage — no rail infrastructure in this scene. YOLO occasionally misclassifies dark, boxy vehicles at distance as trains.
 
+### Custom vehicle classes (fine-tuned model)
+
+Available when a custom model trained via the [LLM auto-label pipeline](llm_autolabel_pipeline.md) is deployed. Inert on the stock COCO model. One symbol per class, per the vocabulary philosophy.
+
+| Emoji | Custom Class | Notes |
+| :---: | :--- | :--- |
+| `🗑️` | `trash_truck` | Municipal sanitation / recycling |
+| `🧹` | `street_sweeper` | Municipal sweeper |
+| `🟫` | `ups_truck` | UPS brown livery |
+| `🟪` | `fedex_truck` | FedEx purple/orange |
+| `📦` | `amazon_van` | Amazon blue Sprinter/Transit |
+| `📮` | `usps_truck` | USPS mail van — white LLV, blue eagle |
+| `🟨` | `dhl_van` | DHL yellow |
+| `🚸` | `school_bus` | Yellow school bus |
+| `🚨🚓` | `police_car` | Emergency composite — score floor 50 |
+| `🚨🚒` | `fire_truck` | Emergency composite — score floor 50 |
+| `🚨🚑` | `ambulance` | Emergency composite — score floor 50 |
+
 ---
 
 ## 2. Pedestrians
@@ -42,6 +60,8 @@ Rook translates yard activity into a compact emoji vocabulary. No video is trans
 | `⚽` | `sports ball` | Kids playing in yard |
 | `🥏` | `frisbee` | Yard recreation |
 | `🪁` | `kite` | Park recreation |
+| `🧢` | `baseball_player` | Custom class (fine-tuned model) — uniformed player |
+| `⚾🏟️` | Baseball game | Heuristic: 3+ `baseball_player` → organized game, score floor 50 |
 
 ---
 
@@ -63,6 +83,36 @@ Rook translates yard activity into a compact emoji vocabulary. No video is trans
 | :---: | :--- | :--- |
 | `🐕⚠️` | Loose dog (no person in scene) | Triggers real-time alert |
 | `🚨🚓` | Emergency responders | Flashing lights in yard |
+
+### Custom wildlife classes (fine-tuned model)
+
+Confirmed local species from the [LLM auto-label pipeline](llm_autolabel_pipeline.md). These supersede the COCO-era proxies when a custom model is deployed: `coyote` replaces the solo-dog-at-quiet-hours heuristic (`🐺⚠️` remains for *suspected* coyotes on the base model), `deer` replaces the sheep/cow remap, and `cardinal`/`blue_jay` replace the HSV color heuristic with real detection.
+
+| Emoji | Custom Class | Score | Notes |
+| :---: | :--- | :---: | :--- |
+| `🐺` | `coyote` | 40 | Confirmed coyote |
+| `🦊` | `fox` | 30 | Red or grey fox |
+| `🦌` | `deer` | 50 | White-tailed deer |
+| `🦝` | `raccoon` | 20 | Often misread by COCO as cat/bear |
+| `🐀` | `opossum` | 15 | Nocturnal visitor |
+| `🦨` | `skunk` | 25 | Nocturnal — advance warning has value |
+| `🐿️` | `squirrel` | 3 | **Silent solo** — stats + Beast Cam only |
+| `🐇` | `rabbit` | 5 | **Silent solo** — stats + Beast Cam only |
+| `🦃` | `wild_turkey` | 25 | Ground flock |
+| `🪿` | `canada_goose` | 15 | Seasonal |
+| `🦅` | `raptor` | 20 | Confirmed bird of prey (generic `bird` stays 10) |
+| `🔴🐦` | `cardinal` | 12 | Replaces red-HSV heuristic |
+| `🔵🐦` | `blue_jay` | 12 | Replaces blue-HSV heuristic |
+
+### Natural phenomena classes (fine-tuned model)
+
+Scene-level events labeled by whole-frame VLM screening of the unclassified archive — subjects a COCO detector cannot propose. Anomaly composites are permitted per the vocabulary philosophy.
+
+| Emoji | Custom Class | Score | Notes |
+| :---: | :--- | :---: | :--- |
+| `🌳⚠️` | `downed_tree` | 40 | Fallen tree/branch — storm damage |
+| `🔥💨` | `smoke` | 100 | **Critical** — fire risk, immediate alert (bear tier) |
+| `🌊` | `flood` | 80 | **Critical** — standing/flowing floodwater |
 
 ---
 
