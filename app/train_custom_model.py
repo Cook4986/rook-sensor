@@ -2,7 +2,7 @@
 """
 train_custom_model.py — fine-tune YOLO26n on the auto-labeled Rook dataset
 
-Consumes the dataset produced by llm_autolabel.py (COCO 0-79 + custom 80-85),
+Consumes the dataset produced by llm_autolabel.py (COCO 0-79 + custom 80-107),
 transfer-learns from yolo26n.pt at the deployment resolution (imgsz=1088),
 gates the release on validation metrics, exports NCNN, and writes a
 model_card.json manifest for auditability (and the future v2 dashboard's
@@ -35,10 +35,22 @@ ARCHIVE_DIR = Path.home() / "Library/CloudStorage/Dropbox/Rook/archive"
 DATASET     = ARCHIVE_DIR / "autolabel" / "dataset.yaml"
 MODELS_DIR  = ARCHIVE_DIR / "models"
 
-# Must match llm_autolabel.py — IDs 80-85. This is the model contract that
-# rook_engine.py relies on (it reads model.names at load time).
-CUSTOM_CLASSES = ["trash_truck", "ups_truck", "fedex_truck",
-                  "amazon_van", "usps_truck", "baseball_player"]
+# Must match llm_autolabel.py — IDs 80+ in this order. This is the model
+# contract that rook_engine.py relies on (it reads model.names at load time).
+CUSTOM_CLASSES = [
+    # Vehicles
+    "trash_truck", "street_sweeper",
+    "ups_truck", "fedex_truck", "amazon_van", "usps_truck", "dhl_van",
+    "school_bus", "police_car", "fire_truck", "ambulance",
+    # People
+    "baseball_player",
+    # Wildlife
+    "coyote", "fox", "deer", "raccoon", "opossum", "skunk",
+    "squirrel", "rabbit", "wild_turkey", "canada_goose",
+    "raptor", "cardinal", "blue_jay",
+    # Natural phenomena
+    "downed_tree", "smoke", "flood",
+]
 
 
 def next_version() -> int:

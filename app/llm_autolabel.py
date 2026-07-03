@@ -5,16 +5,27 @@ llm_autolabel.py — LLM-assisted auto-labeling of the Rook archive (Mac-side)
 Turns the unclassified/reclassified archive into a YOLO training dataset with
 ZERO manual annotation, using a two-model split:
 
-  Stage A  Teacher detector (YOLO26l/x, conf=0.20) draws bounding boxes —
-           detectors localize well; VLMs don't.
-  Stage B  A vision LLM classifies crops of refinable classes (truck, car,
-           bus, person) into fine-grained local classes (trash_truck,
-           ups_truck, fedex_truck, amazon_van, usps_truck, baseball_player)
-           via a closed-vocabulary prompt with a "none" escape hatch —
-           VLMs excel at crop classification.
-  Stage C  Emits a standard YOLO dataset: COCO IDs 0-79 preserved, custom
-           classes appended as IDs 80-85, processed/ frames included as
-           empty-label background negatives (anti-hallucination).
+  Stage A   Teacher detector (YOLO26l/x, conf=0.20) draws bounding boxes —
+            detectors localize well; VLMs don't.
+  Stage B1  A vision LLM classifies crops of refinable classes (vehicles,
+            person, animals) into fine-grained local classes: per-vendor
+            delivery vans (UPS/FedEx/Amazon/USPS/DHL), municipal vehicles,
+            school buses, emergency responders, and specific wildlife
+            (coyote, fox, deer, raccoon, raptor, ...) via a closed-vocabulary
+            prompt with a "none" escape hatch — VLMs excel at crop
+            classification.
+  Stage B2  Whole-frame screening for frames where the teacher found NOTHING
+            (the bulk of the unclassified archive): the VLM checks for
+            wildlife the detector missed (squirrels, rabbits, turkeys...) and
+            scene-level natural phenomena (downed tree, smoke/fire, flooding)
+            and returns an approximate normalized bounding box. Boxes are
+            rougher than detector boxes, so this stage uses a higher
+            confidence gate and a minimum-area check; the target subjects
+            (smoke plumes, fallen trees, prominent animals that survived the
+            persistence gate) tolerate coarse localization.
+  Stage C   Emits a standard YOLO dataset: COCO IDs 0-79 preserved, custom
+            classes appended from ID 80, processed/ frames included as
+            empty-label background negatives (anti-hallucination).
 
 Privacy: runs entirely on the owner's Mac against the owner's own Dropbox
 archive. Crops are sent to the configured LLM API only when LLM_API_KEY is
@@ -58,6 +69,7 @@ ARCHIVE_DIR      = Path.home() / "Library/CloudStorage/Dropbox/Rook/archive"
 UNCLASSIFIED_DIR = ARCHIVE_DIR / "unclassified"
 RECLASSIFIED_DIR = ARCHIVE_DIR / "reclassified"
 PROCESSED_DIR    = ARCHIVE_DIR / "processed"      # hard negatives (verified empty)
+BEAST_CAM_DIR    = ARCHIVE_DIR / "beast_cam"      # wildlife crops (date subdirs)
 DATASET_DIR      = ARCHIVE_DIR / "autolabel"      # output YOLO dataset
 CACHE_FILE       = DATASET_DIR / "autolabel_cache.jsonl"
 
@@ -65,6 +77,11 @@ LLM_API_BASE = os.environ.get("LLM_API_BASE", "https://api.openai.com/v1")
 LLM_API_KEY  = os.environ.get("LLM_API_KEY", "")
 LLM_MODEL    = os.environ.get("LLM_MODEL", "gpt-4o-mini")
 LLM_MIN_CONF = float(os.environ.get("LLM_MIN_CONFIDENCE", "0.8"))
+# Whole-frame verdicts carry VLM-drawn (approximate) boxes → stricter gate
+SCENE_MIN_CONF = float(os.environ.get("LLM_SCENE_MIN_CONFIDENCE", "0.85"))
+SCENE_MIN_BOX_AREA = 0.003   # normalized area floor — matches the archive's
+                             # 800px² persistence gate at 640×360; rejects
+                             # boxes too small for a rough VLM box to be useful
 
 # Teacher proposals: same low threshold as reclassify_archive.py to catch
 # faint/distant subjects; boxes NOT promoted by the VLM must clear a higher
@@ -72,28 +89,87 @@ LLM_MIN_CONF = float(os.environ.get("LLM_MIN_CONFIDENCE", "0.8"))
 TEACHER_CONF          = 0.20
 TEACHER_KEEP_MIN_CONF = 0.35
 
-# COCO class → candidate custom subclasses the VLM may promote it to.
-# Closed vocabulary per parent class keeps the LLM honest.
-REFINABLE = {
-    "truck":  ["trash_truck", "ups_truck", "fedex_truck", "amazon_van", "usps_truck"],
-    "bus":    ["trash_truck", "ups_truck", "fedex_truck", "amazon_van", "usps_truck"],
-    "car":    ["amazon_van", "usps_truck"],   # vans/LLVs sometimes classify as car
-    "person": ["baseball_player"],
-}
-
-# Custom classes appended after COCO's 80 — order is the model contract.
-# rook_engine.py and train_custom_model.py must agree with this list.
-CUSTOM_CLASSES = ["trash_truck", "ups_truck", "fedex_truck",
-                  "amazon_van", "usps_truck", "baseball_player"]
+# ── Custom vocabulary — the model contract ────────────────────────────────────
+# Appended after COCO's 80 classes IN THIS ORDER (IDs 80+). rook_engine.py and
+# train_custom_model.py must agree with this list. Grouped: vehicles, people,
+# wildlife, natural phenomena.
+CUSTOM_CLASSES = [
+    # Vehicles — municipal / delivery / school / emergency (IDs 80-90)
+    "trash_truck", "street_sweeper",
+    "ups_truck", "fedex_truck", "amazon_van", "usps_truck", "dhl_van",
+    "school_bus", "police_car", "fire_truck", "ambulance",
+    # People (ID 91)
+    "baseball_player",
+    # Wildlife — specific local species (IDs 92-104)
+    "coyote", "fox", "deer", "raccoon", "opossum", "skunk",
+    "squirrel", "rabbit", "wild_turkey", "canada_goose",
+    "raptor", "cardinal", "blue_jay",
+    # Natural phenomena — scene-level events (IDs 105-107)
+    "downed_tree", "smoke", "flood",
+]
 
 VISUAL_CUES = {
+    # Vehicles
     "trash_truck":     "garbage/recycling truck: rear or side loader, hopper, municipal livery",
+    "street_sweeper":  "street sweeper: compact municipal vehicle, rotating brushes, water spray",
     "ups_truck":       "UPS: brown package car or brown/gold semi, UPS shield logo",
     "fedex_truck":     "FedEx: white body with purple/orange or purple/green FedEx wordmark",
     "amazon_van":      "Amazon: blue-grey Sprinter/Transit van, Prime smile-arrow logo",
-    "usps_truck":      "USPS: white LLV/ProMaster, blue eagle logo, red-blue stripe",
+    "usps_truck":      "USPS mail van: white LLV/ProMaster, blue eagle logo, red-blue stripe",
+    "dhl_van":         "DHL: yellow van with red DHL wordmark",
+    "school_bus":      "school bus: yellow body, black lettering, flashing stop sign arm",
+    "police_car":      "police: black-and-white or marked cruiser/SUV, light bar, shield decal",
+    "fire_truck":      "fire apparatus: red engine/ladder truck, ladders, hose reels",
+    "ambulance":       "ambulance: white/red box body, star of life, light bar",
+    # People
     "baseball_player": "person in baseball uniform: cap, jersey, baseball pants, glove or bat",
+    # Wildlife
+    "coyote":          "coyote: lean grey-tan wild canid, pointed ears/muzzle, bushy drooping tail",
+    "fox":             "fox: small canid, red-orange or grey coat, white-tipped bushy tail",
+    "deer":            "deer: white-tailed deer, tan coat, slender legs; antlers if buck",
+    "raccoon":         "raccoon: black face mask, ringed tail, grey stocky body",
+    "opossum":         "opossum: grey-white fur, pointed white face, naked rat-like tail",
+    "skunk":           "skunk: black body with bold white stripe(s), bushy tail",
+    "squirrel":        "squirrel: small grey/brown rodent, prominent bushy tail",
+    "rabbit":          "rabbit: cottontail, long ears, compact body, white tail puff",
+    "wild_turkey":     "wild turkey: large dark ground bird, fan tail, red wattle",
+    "canada_goose":    "Canada goose: black head/neck with white chinstrap, brown body",
+    "raptor":          "bird of prey: hawk/owl/falcon — hooked beak, broad wings, perched or soaring",
+    "cardinal":        "northern cardinal: vivid red songbird (male) or tan-red with crest (female)",
+    "blue_jay":        "blue jay: blue crest and back, white/grey underside, black collar",
+    # Natural phenomena
+    "downed_tree":     "downed tree or large fallen branch across yard, path, or street",
+    "smoke":           "smoke or visible fire: plume, haze column, or flames",
+    "flood":           "standing or flowing floodwater covering ground/street surfaces",
 }
+
+# COCO class → candidate custom subclasses the VLM may promote it to.
+# Closed vocabulary per parent class keeps the LLM honest. Wildlife parents
+# cover COCO's habitual confusions (raccoon→cat/bear, coyote→dog, deer→sheep).
+REFINABLE = {
+    # Vehicles
+    "truck":  ["trash_truck", "street_sweeper", "ups_truck", "fedex_truck",
+               "amazon_van", "usps_truck", "dhl_van", "fire_truck", "ambulance"],
+    "bus":    ["trash_truck", "school_bus", "ups_truck", "fedex_truck",
+               "amazon_van", "dhl_van", "fire_truck", "ambulance"],
+    "car":    ["amazon_van", "usps_truck", "dhl_van", "police_car", "ambulance"],
+    # People
+    "person": ["baseball_player"],
+    # Wildlife (COCO's generic/confused animal classes)
+    "dog":    ["coyote", "fox", "deer"],
+    "cat":    ["raccoon", "opossum", "skunk", "rabbit", "squirrel", "fox"],
+    "bear":   ["raccoon", "deer"],
+    "sheep":  ["deer", "coyote"],
+    "cow":    ["deer"],
+    "horse":  ["deer"],
+    "bird":   ["raptor", "wild_turkey", "canada_goose", "cardinal", "blue_jay"],
+}
+
+# Whole-frame (Stage B2) vocabulary: subjects the teacher detector cannot
+# propose — small wildlife it missed entirely, plus non-COCO scene phenomena.
+SCENE_CLASSES = ["coyote", "fox", "deer", "raccoon", "opossum", "skunk",
+                 "squirrel", "rabbit", "wild_turkey", "canada_goose", "raptor",
+                 "downed_tree", "smoke", "flood"]
 
 VAL_FRACTION = 0.15   # deterministic per-image split (hash-based, stable across runs)
 
@@ -128,21 +204,59 @@ def _parse_verdict(text: str, candidates: list):
     return {"label": label, "confidence": max(0.0, min(1.0, conf))}
 
 
-def classify_crop(client: httpx.Client, crop_jpg: bytes, parent_class: str, candidates: list):
-    """One VLM round-trip. Returns {"label", "confidence"} or None on failure.
+def _scene_prompt() -> str:
+    cues = "\n".join(f"- {c}: {VISUAL_CUES[c]}" for c in SCENE_CLASSES)
+    return (
+        "This frame is from a fixed yard-monitoring camera. An object detector "
+        "found nothing, but motion was observed. Check carefully for any of:\n"
+        f"{cues}\n"
+        "If exactly one is clearly present, answer with that label, your "
+        "confidence, and an approximate bounding box [x_min, y_min, x_max, y_max] "
+        "normalized to 0.0-1.0. If nothing matches, or you are unsure, answer "
+        "'none'.\n"
+        'Respond with ONLY this JSON: {"label": "<candidate-or-none>", '
+        '"confidence": <0.0-1.0>, "box": [x_min, y_min, x_max, y_max]}'
+    )
 
-    Malformed responses are retried once, then dropped (caller falls back to
-    the COCO label) — a bad label is worse than no label.
-    """
-    b64 = base64.b64encode(crop_jpg).decode()
+
+def _parse_scene_verdict(text: str):
+    """Parse a whole-frame verdict; validate label vocabulary AND box geometry."""
+    m = re.search(r"\{.*?\}", text, re.DOTALL)
+    if not m:
+        return None
+    try:
+        data = json.loads(m.group(0))
+        label = str(data.get("label", "none")).strip().lower()
+        conf = float(data.get("confidence", 0.0))
+    except (ValueError, TypeError, json.JSONDecodeError):
+        return None
+    if label == "none":
+        return {"label": "none", "confidence": conf, "box": None}
+    if label not in SCENE_CLASSES:
+        return None
+    try:
+        x1, y1, x2, y2 = (float(v) for v in data["box"])
+    except (KeyError, ValueError, TypeError):
+        return None
+    x1, y1 = max(0.0, x1), max(0.0, y1)
+    x2, y2 = min(1.0, x2), min(1.0, y2)
+    if x2 <= x1 or y2 <= y1 or (x2 - x1) * (y2 - y1) < SCENE_MIN_BOX_AREA:
+        return None
+    return {"label": label, "confidence": max(0.0, min(1.0, conf)),
+            "box": [round(v, 4) for v in (x1, y1, x2, y2)]}
+
+
+def _vlm_round_trip(client: httpx.Client, jpg: bytes, prompt: str, parse_fn):
+    """Shared VLM call with one retry; parse failures fall through to None."""
+    b64 = base64.b64encode(jpg).decode()
     payload = {
         "model": LLM_MODEL,
         "temperature": 0,
-        "max_tokens": 60,
+        "max_tokens": 100,
         "messages": [{
             "role": "user",
             "content": [
-                {"type": "text", "text": _crop_prompt(parent_class, candidates)},
+                {"type": "text", "text": prompt},
                 {"type": "image_url",
                  "image_url": {"url": f"data:image/jpeg;base64,{b64}", "detail": "low"}},
             ],
@@ -152,12 +266,26 @@ def classify_crop(client: httpx.Client, crop_jpg: bytes, parent_class: str, cand
         try:
             r = client.post(f"{LLM_API_BASE}/chat/completions", json=payload, timeout=60)
             r.raise_for_status()
-            verdict = _parse_verdict(r.json()["choices"][0]["message"]["content"], candidates)
+            verdict = parse_fn(r.json()["choices"][0]["message"]["content"])
             if verdict is not None:
                 return verdict
         except httpx.HTTPError:
             pass
     return None
+
+
+def classify_frame(client: httpx.Client, frame_jpg: bytes):
+    """Stage B2: whole-frame screening. Returns {"label","confidence","box"} or None."""
+    return _vlm_round_trip(client, frame_jpg, _scene_prompt(), _parse_scene_verdict)
+
+
+def classify_crop(client: httpx.Client, crop_jpg: bytes, parent_class: str, candidates: list):
+    """Stage B1: one crop-classification round-trip. Returns {"label","confidence"}
+    or None on failure — malformed responses are retried once, then dropped
+    (caller falls back to the COCO label); a bad label is worse than no label.
+    """
+    return _vlm_round_trip(client, crop_jpg, _crop_prompt(parent_class, candidates),
+                           lambda text: _parse_verdict(text, candidates))
 
 
 # ── Verdict cache (content-addressed — each crop billed once, ever) ──────────
@@ -200,7 +328,7 @@ def write_sample(img_path: Path, labels: list, split: str):
 
 
 def write_data_yaml(coco_names: dict):
-    """dataset.yaml: COCO 0-79 preserved, custom classes appended as 80-85."""
+    """dataset.yaml: COCO 0-79 preserved, custom classes appended from ID 80."""
     lines = [f"path: {DATASET_DIR}", "train: images/train", "val: images/val", "", "names:"]
     for i in range(80):
         lines.append(f"  {i}: {coco_names[i]}")
@@ -252,7 +380,12 @@ def main():
     name_to_id = {v: k for k, v in coco_names.items()}
     custom_id = {name: 80 + i for i, name in enumerate(CUSTOM_CLASSES)}
 
-    frames = sorted(set(UNCLASSIFIED_DIR.glob("*.jpg")) | set(RECLASSIFIED_DIR.glob("*.jpg")))
+    # Sources: ghost-motion frames, Mac-reclassified frames, and Beast Cam
+    # wildlife crops (date subdirs) — the crops are ideal Stage B1 inputs for
+    # the specific-species vocabulary.
+    frames = sorted(set(UNCLASSIFIED_DIR.glob("*.jpg"))
+                    | set(RECLASSIFIED_DIR.glob("*.jpg"))
+                    | set(BEAST_CAM_DIR.glob("*/*.jpg")))
     if not frames:
         print("   No archive frames to process.")
         return
@@ -261,7 +394,8 @@ def main():
     client = httpx.Client(headers={"Authorization": f"Bearer {LLM_API_KEY}"})
 
     llm_calls = 0
-    stats = {"frames": 0, "boxes": 0, "promoted": {}, "cache_hits": 0, "llm_failures": 0}
+    stats = {"frames": 0, "boxes": 0, "promoted": {}, "scene_finds": {},
+             "cache_hits": 0, "llm_failures": 0}
 
     print(f"   Processing {len(frames)} frames (cache: {len(cache)} verdicts)...\n")
 
@@ -326,6 +460,38 @@ def main():
                            (x2 - x1) / img_w, (y2 - y1) / img_h))
             stats["boxes"] += 1
 
+        # ── Stage B2: whole-frame screening when the teacher found nothing ──
+        # These are the frames the pipeline exists for — motion with no COCO
+        # detection: small wildlife (squirrels, rabbits, turkeys) and scene
+        # phenomena (downed trees, smoke, flooding) the detector cannot propose.
+        if not labels and LLM_API_KEY:
+            frame_hash = hashlib.sha256(img_path.read_bytes()).hexdigest()
+            verdict = None
+            if frame_hash in cache:
+                verdict = cache[frame_hash]
+                stats["cache_hits"] += 1
+            elif llm_calls < args.max_crops:
+                ok, jpg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                if ok:
+                    verdict = classify_frame(client, jpg.tobytes())
+                    llm_calls += 1
+                    if verdict is None:
+                        stats["llm_failures"] += 1
+                    else:
+                        append_cache({"hash": frame_hash, "parent": "__frame__",
+                                      "source": img_path.name, **verdict})
+                        cache[frame_hash] = verdict
+
+            if (verdict and verdict["label"] != "none" and verdict.get("box")
+                    and verdict["confidence"] >= SCENE_MIN_CONF):
+                bx1, by1, bx2, by2 = verdict["box"]
+                labels.append((custom_id[verdict["label"]],
+                               (bx1 + bx2) / 2, (by1 + by2) / 2,
+                               bx2 - bx1, by2 - by1))
+                stats["boxes"] += 1
+                stats["scene_finds"][verdict["label"]] = \
+                    stats["scene_finds"].get(verdict["label"], 0) + 1
+
         if labels and not args.dry_run:
             write_sample(img_path, labels, split_of(img_path))
         if labels:
@@ -345,8 +511,10 @@ def main():
             "teacher": f"yolo26{args.model}.pt", "teacher_conf": TEACHER_CONF,
             "vlm": LLM_MODEL if LLM_API_KEY else None,
             "vlm_min_confidence": LLM_MIN_CONF,
+            "scene_min_confidence": SCENE_MIN_CONF,
             "labeled_frames": stats["frames"], "boxes": stats["boxes"],
             "negatives": len(negatives), "promoted": stats["promoted"],
+            "scene_finds": stats["scene_finds"],
             "llm_calls": llm_calls, "cache_hits": stats["cache_hits"],
         }
         with open(DATASET_DIR / "manifest.json", "w") as f:
@@ -354,12 +522,16 @@ def main():
 
     # ── Summary ───────────────────────────────────────────────────────────────
     promoted_total = sum(stats["promoted"].values())
+    scene_total = sum(stats["scene_finds"].values())
     print(f"\n{'=' * 48}")
     print(f"🏷️  Rook Auto-Label Complete{' (dry run)' if args.dry_run else ''}")
     print(f"   Frames labeled    : {stats['frames']}")
     print(f"   Boxes written     : {stats['boxes']}")
     print(f"   Custom promotions : {promoted_total}")
     for name, n in sorted(stats["promoted"].items(), key=lambda x: -x[1]):
+        print(f"      {name}: {n}")
+    print(f"   Scene finds (B2)  : {scene_total}")
+    for name, n in sorted(stats["scene_finds"].items(), key=lambda x: -x[1]):
         print(f"      {name}: {n}")
     print(f"   Background negs   : {len(negatives)}")
     print(f"   LLM calls / cache : {llm_calls} / {stats['cache_hits']}")
@@ -370,10 +542,14 @@ def main():
     print(f"{'=' * 48}\n")
 
     if args.slack and not args.dry_run:
+        combined = dict(stats["promoted"])
+        for k, v in stats["scene_finds"].items():
+            combined[k] = combined.get(k, 0) + v
         summary = "  ".join(f"{k} ×{v}" for k, v in
-                            sorted(stats["promoted"].items(), key=lambda x: -x[1]))
+                            sorted(combined.items(), key=lambda x: -x[1]))
         send_slack(f"🏷️ *Rook Auto-Label* — {stats['frames']} frames → "
-                   f"{stats['boxes']} boxes, {promoted_total} custom promotions\n"
+                   f"{stats['boxes']} boxes ({promoted_total} crop promotions, "
+                   f"{scene_total} whole-frame finds)\n"
                    f"   {summary or 'no custom classes found'}\n"
                    f"   LLM calls: {llm_calls} (cache hits: {stats['cache_hits']}) — "
                    f"dataset at `archive/autolabel/`")
