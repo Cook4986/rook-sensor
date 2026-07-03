@@ -1,5 +1,7 @@
 # Rook Custom Model Training Proposal
 
+> **Status:** Implemented — see [`docs/llm_autolabel_pipeline.md`](docs/llm_autolabel_pipeline.md). The annotation step below (§2, Roboflow/CVAT) is **superseded by LLM auto-labeling** (`app/llm_autolabel.py`): a teacher detector draws boxes and a vision LLM assigns the fine-grained labels, so no manual annotation is required. Training and deployment are automated by `app/train_custom_model.py` and `app/deploy_model_to_pi.sh`. This document is retained as the original design rationale.
+
 To ensure we don't miss specific urban/suburban events like delivery trucks, garbage collection, and sports games, we need to move beyond the generic 80 COCO classes. YOLO26n is excellent out of the box, but it cannot differentiate between an Amazon van and a generic box truck, or recognize when a person is in a baseball uniform.
 
 Here is a proposed pipeline to deploy custom YOLO extensions for Rook:

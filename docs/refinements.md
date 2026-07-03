@@ -46,7 +46,11 @@ Identified hardware and software improvements from prototyping, assembly, and li
 
 ### 4. Web Dashboard
 - **Current:** Setup and calibration require SSH terminal access.
-- **v2:** `rook-dashboard` (Next.js + Supabase + Vercel) for remote `.env` management, viewfinder, and threshold tuning without SSH.
+- **v2:** `rook-dashboard` (Next.js + Supabase + Vercel) for remote `.env` management, viewfinder, and threshold tuning without SSH. Model provenance view backed by the `model_card.json` manifests produced by the custom-training pipeline (maps 1:1 onto a `model_versions` table).
+
+### 5. Custom Detection Vocabulary — **Pipeline implemented**
+- **Current:** LLM auto-label pipeline ([design](llm_autolabel_pipeline.md)) turns the unclassified archive into training data with no manual annotation: teacher detector (YOLO26l/x) draws boxes, a vision LLM classifies crops into `trash_truck`, `ups_truck`, `fedex_truck`, `amazon_van`, `usps_truck`, `baseball_player`. Fine-tune + release gate + NCNN export via `train_custom_model.py`; versioned deploy with health-check rollback via `deploy_model_to_pi.sh`. Engine maps are pre-wired and inert until a custom model is live.
+- **Closes:** the `LINGER_THRESHOLDS` truck gap — trash/delivery trucks alert on positive identification (score path), so the 2–5 min stop cycle no longer needs a lingering threshold.
 
 ---
 

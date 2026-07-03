@@ -77,6 +77,18 @@ Standard message and data rates from your mobile carrier may apply. Carriers are
 | **Open-Meteo** | Weather context (read-only API) | Device IP, GPS bounding box from configured coordinates |
 | **iNaturalist API** | Local species context (read-only) | Configured latitude/longitude |
 | **Tailscale** | Secure remote SSH (VPN) | Device hostname, encrypted IP tunnel |
+| **LLM API** (optional, owner-configured) | Offline auto-labeling of the owner's archive for model training | Image crops of detected objects (vehicles, uniformed players) from the owner's own archive |
+
+### LLM Auto-Labeling (optional, off-device)
+
+The optional training pipeline (`app/llm_autolabel.py`) can send **cropped detections from the owner's own archive** to a vision LLM API the owner configures (e.g., OpenAI, or a fully local model via Ollama/vLLM) to assign fine-grained labels for model training. This tool:
+
+- Runs **only on the owner's computer**, only when the owner invokes it — never on the Pi, never in the real-time detection path
+- Is **opt-in**: if no `LLM_API_KEY` is configured, no data is sent anywhere
+- Sends only object crops (typically vehicles) from frames the owner already possesses in their private archive
+- Can be pointed at a **self-hosted LLM endpoint** for a fully offline workflow
+
+The device's core privacy posture is unchanged: no cloud inference, no video storage, frames exist only in RAM during live operation.
 
 ## GDPR / CCPA
 

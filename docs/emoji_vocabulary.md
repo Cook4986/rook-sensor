@@ -18,6 +18,18 @@ Rook translates yard activity into a compact emoji vocabulary. No video is trans
 
 > **Suppressed classes:** `train` (🚂) is fully ignored at the detection stage — no rail infrastructure in this scene. YOLO occasionally misclassifies dark, boxy vehicles at distance as trains.
 
+### Custom vehicle classes (fine-tuned model)
+
+Available when a custom model trained via the [LLM auto-label pipeline](llm_autolabel_pipeline.md) is deployed. Inert on the stock COCO model. One symbol per class, per the vocabulary philosophy.
+
+| Emoji | Custom Class | Notes |
+| :---: | :--- | :--- |
+| `🗑️` | `trash_truck` | Municipal sanitation / recycling |
+| `🟫` | `ups_truck` | UPS brown livery |
+| `🟪` | `fedex_truck` | FedEx purple/orange |
+| `📦` | `amazon_van` | Amazon blue Sprinter/Transit |
+| `📮` | `usps_truck` | USPS white LLV, blue eagle |
+
 ---
 
 ## 2. Pedestrians
@@ -42,6 +54,8 @@ Rook translates yard activity into a compact emoji vocabulary. No video is trans
 | `⚽` | `sports ball` | Kids playing in yard |
 | `🥏` | `frisbee` | Yard recreation |
 | `🪁` | `kite` | Park recreation |
+| `🧢` | `baseball_player` | Custom class (fine-tuned model) — uniformed player |
+| `⚾🏟️` | Baseball game | Heuristic: 3+ `baseball_player` → organized game, score floor 50 |
 
 ---
 

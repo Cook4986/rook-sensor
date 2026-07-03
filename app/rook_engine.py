@@ -68,6 +68,12 @@ EMOJI_MAP = {
     "bus": "🚌", "truck": "🚚", "boat": "⛵", "airplane": "✈️",
     # Wildlife (relevant urban/suburban)
     "dog": "🐕", "cat": "🐈", "bird": "🦅", "bear": "🐻", "horse": "🐎",
+    # Custom classes (IDs 80-85, fine-tuned model — see docs/llm_autolabel_pipeline.md).
+    # Inert when the base 80-class COCO model is loaded: these names never appear
+    # in detections, so all custom-class maps below are no-ops until a custom
+    # model is deployed via deploy_model_to_pi.sh.
+    "trash_truck": "🗑️", "ups_truck": "🟫", "fedex_truck": "🟪",
+    "amazon_van": "📦", "usps_truck": "📮", "baseball_player": "🧢",
 }
 
 
@@ -107,17 +113,28 @@ SCORE_MAP = {
     "horse":       8,
     # ─ Critical ───────────────────────────────────────────────────────────────
     "bear":      100,
-    # ─ Custom training targets (requires fine-tuned model — see training plan) ──
-    # "trash_truck":    15,   # Municipal: high recurrence cadence, contextual AM timing
-    # "ups_truck":      12,   # Delivery: UPS brown livery
-    # "fedex_truck":    12,   # Delivery: FedEx purple/orange or white
-    # "amazon_van":     12,   # Delivery: Amazon blue Sprinter/Transit Connect
-    # "baseball_player": 8,  # Custom: uniform + equipment
-    # "baseball_game":  50,   # Aggregate: crowd + uniforms + equipment (congregation event)
+    # ─ Custom classes (fine-tuned model, IDs 80-85 — see docs/llm_autolabel_pipeline.md) ──
+    "trash_truck":    15,   # Municipal: high recurrence cadence, contextual AM timing
+    "ups_truck":      12,   # Delivery: UPS brown livery
+    "fedex_truck":    12,   # Delivery: FedEx purple/orange or white
+    "amazon_van":     12,   # Delivery: Amazon blue Sprinter/Transit Connect
+    "usps_truck":     12,   # Delivery: USPS white LLV, blue eagle
+    "baseball_player": 8,   # Custom: uniform + equipment
+    # "baseball_game" is not a detector class — it's a congregation heuristic:
+    # 3+ baseball_player detections floor the score at 50 (see calculate_image_score).
 }
 
+# ── Custom Detection Vocabulary (fine-tuned model only) ──────────────────────
+# Fine-grained local classes appended to COCO as IDs 80-85 by the LLM auto-label
+# pipeline (docs/llm_autolabel_pipeline.md). The class list is the contract shared
+# with llm_autolabel.py / train_custom_model.py. With the stock COCO model these
+# names never occur, so every reference below is a silent no-op.
+CUSTOM_DELIVERY_CLASSES = {"ups_truck", "fedex_truck", "amazon_van", "usps_truck"}
+CUSTOM_CLASSES = CUSTOM_DELIVERY_CLASSES | {"trash_truck", "baseball_player"}
+
 # ── Daily Stats Category Membership ──────────────────────────────────────────
-TRAFFIC_CLASSES    = {"car", "truck", "bus", "motorcycle", "bicycle"}
+TRAFFIC_CLASSES    = {"car", "truck", "bus", "motorcycle", "bicycle",
+                      "trash_truck"} | CUSTOM_DELIVERY_CLASSES
 
 # Classes fully suppressed from detection — not present in this scene and cause misclassification noise.
 # "train"          🚂  No rail infrastructure nearby — boxy dark vehicle misclassification.
@@ -156,9 +173,9 @@ LINGER_EMOJI = {
     "bicycle":    "🚲🔒",   # Unattended bicycle
     "person":     "🚶⏱️",   # Loitering individual / group
 }
-PEDESTRIAN_CLASSES = {"person"}
+PEDESTRIAN_CLASSES = {"person", "baseball_player"}
 ANIMAL_CLASSES     = {"bird", "dog", "cat", "bear", "horse"}
-DELIVERY_CLASSES   = {"truck"}
+DELIVERY_CLASSES   = {"truck"} | CUSTOM_DELIVERY_CLASSES
 WILDLIFE_CLASSES   = ANIMAL_CLASSES
 
 # Classes silenced when appearing solo (background noise)
@@ -439,6 +456,13 @@ def translate_to_emoji_summary(detected_classes, motion_pixels=0, frame_bgr=None
     night = not is_daytime()
     quiet = is_quiet_hours()
 
+    # Baseball game (custom model): 3+ uniformed players = organized game.
+    # Fires before the generic crowd heuristics so a game isn't reported as 🏟️.
+    if counts.get("baseball_player", 0) >= 3:
+        summary.append("⚾🏟️")
+        counts["baseball_player"] = 0
+        counts["person"] = 0   # remaining persons are spectators/umpires — implied
+
     # Large crowd
     if counts.get("person", 0) >= 5:
         summary.append("🏟️")   # Rally / incident
@@ -589,10 +613,18 @@ def calculate_image_score(detected_classes, weather_bonus: int = 0):
         score += 10   # Small gathering
         score = max(score, 30)
 
-    heavy = counts.get("truck", 0) + counts.get("bus", 0)
+    heavy = (counts.get("truck", 0) + counts.get("bus", 0)
+             + counts.get("trash_truck", 0)
+             + sum(counts.get(c, 0) for c in CUSTOM_DELIVERY_CLASSES))
     if heavy >= 1:
         score += 20   # Multiple heavy vehicles: fire response, utility, crash
         score = max(score, 30)
+
+    # Baseball game congregation (custom model): 3+ uniformed players = organized
+    # game, the "rare/critical" tier per docs/emoji_vocabulary.md alert scoring.
+    if counts.get("baseball_player", 0) >= 3:
+        score += 20
+        score = max(score, 50)
 
     # Unaccompanied animals
     for animal in ["dog", "cat", "bear", "horse"]:
@@ -1096,6 +1128,16 @@ def main():
             _model_label += ", 3 threads"
         except Exception:
             pass
+    # Detect whether the loaded model carries the custom local vocabulary
+    # (fine-tuned via the LLM auto-label pipeline) or is the stock 80-class COCO
+    # model. Logged for diagnostics and surfaced to the future v2 dashboard.
+    try:
+        _model_classes = set(model.names.values())
+    except Exception:
+        _model_classes = set()
+    _custom_active = sorted(CUSTOM_CLASSES & _model_classes)
+    if _custom_active:
+        _model_label += f" +custom[{','.join(_custom_active)}]"
     logging.info(f"🧠 {_model_label} loaded.")
 
     cam = Picamera2()
