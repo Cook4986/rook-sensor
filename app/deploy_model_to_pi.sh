@@ -22,7 +22,9 @@ set -euo pipefail
 MODELS_DIR="$HOME/Library/CloudStorage/Dropbox/Rook/archive/models"
 VERSION="${1:-}"
 HOST="${2:-rook@rook.local}"
-SSH_OPTS="-o StrictHostKeyChecking=no -o ConnectTimeout=10 -o BatchMode=yes"
+# accept-new: trust the Pi's host key on first connect, then pin it —
+# safer than =no (which never verifies) with no automation cost.
+SSH_OPTS="-o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 -o BatchMode=yes"
 MODEL_LINK="~/yolo26n_1088_ncnn_model"
 HEALTH_TIMEOUT=60   # seconds to wait for a healthy engine restart
 
