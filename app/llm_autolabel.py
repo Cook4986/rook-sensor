@@ -67,6 +67,7 @@ load_dotenv(Path.home() / ".env")
 
 ARCHIVE_DIR      = Path.home() / "Library/CloudStorage/Dropbox/Rook/archive"
 UNCLASSIFIED_DIR = ARCHIVE_DIR / "unclassified"
+CLASSIFIED_DIR   = ARCHIVE_DIR / "classified"     # Pi-confirmed detections + .json sidecars
 RECLASSIFIED_DIR = ARCHIVE_DIR / "reclassified"
 PROCESSED_DIR    = ARCHIVE_DIR / "processed"      # hard negatives (verified empty)
 BEAST_CAM_DIR    = ARCHIVE_DIR / "beast_cam"      # wildlife crops (date subdirs)
@@ -380,10 +381,16 @@ def main():
     name_to_id = {v: k for k, v in coco_names.items()}
     custom_id = {name: 80 + i for i, name in enumerate(CUSTOM_CLASSES)}
 
-    # Sources: ghost-motion frames, Mac-reclassified frames, and Beast Cam
-    # wildlife crops (date subdirs) — the crops are ideal Stage B1 inputs for
-    # the specific-species vocabulary.
+    # Sources:
+    #   unclassified/  ghost motion — subjects the Pi missed (recall examples)
+    #   classified/    Pi-confirmed detections at conf 0.70 — hard positives that
+    #                  REFINE existing classes, plus confirmed truck/bird parents
+    #                  to mine vendor/species subclasses from (.json sidecars
+    #                  carry the Pi's verdict for agreement auditing)
+    #   reclassified/  Mac-teacher finds the Pi missed
+    #   beast_cam/     wildlife crops — ideal Stage B1 species inputs
     frames = sorted(set(UNCLASSIFIED_DIR.glob("*.jpg"))
+                    | set(CLASSIFIED_DIR.glob("*.jpg"))
                     | set(RECLASSIFIED_DIR.glob("*.jpg"))
                     | set(BEAST_CAM_DIR.glob("*/*.jpg")))
     if not frames:
@@ -395,7 +402,8 @@ def main():
 
     llm_calls = 0
     stats = {"frames": 0, "boxes": 0, "promoted": {}, "scene_finds": {},
-             "cache_hits": 0, "llm_failures": 0}
+             "cache_hits": 0, "llm_failures": 0,
+             "classified_frames": 0, "pi_agree": 0, "pi_disagree": 0}
 
     print(f"   Processing {len(frames)} frames (cache: {len(cache)} verdicts)...\n")
 
@@ -405,6 +413,7 @@ def main():
         img_h, img_w = results[0].orig_shape
         frame = cv2.imread(str(img_path))
         labels = []
+        is_classified = img_path.parent.name == "classified"
 
         for i, cls_id in enumerate(boxes.cls):
             cls_name = coco_names[int(cls_id)]
@@ -492,6 +501,26 @@ def main():
                 stats["scene_finds"][verdict["label"]] = \
                     stats["scene_finds"].get(verdict["label"], 0) + 1
 
+        # ── Pi-vs-teacher agreement audit (classified/ frames only) ────────
+        # The sidecar records what the Pi detected at conf 0.70. Comparing it
+        # against the teacher's verdict quantifies where the deployed nano
+        # model needs refinement — persistent disagreement per class is the
+        # signal to grow that class's share of the dataset.
+        if is_classified:
+            stats["classified_frames"] += 1
+            sidecar = img_path.with_suffix(".json")
+            if sidecar.exists():
+                try:
+                    pi_classes = set(json.loads(sidecar.read_text()).get("pi_classes", []))
+                    teacher_classes = {coco_names[int(c)] for i, c in enumerate(boxes.cls)
+                                       if float(boxes.conf[i]) >= TEACHER_KEEP_MIN_CONF}
+                    if pi_classes <= teacher_classes:
+                        stats["pi_agree"] += 1
+                    else:
+                        stats["pi_disagree"] += 1
+                except (json.JSONDecodeError, OSError):
+                    pass
+
         if labels and not args.dry_run:
             write_sample(img_path, labels, split_of(img_path))
         if labels:
@@ -515,6 +544,9 @@ def main():
             "labeled_frames": stats["frames"], "boxes": stats["boxes"],
             "negatives": len(negatives), "promoted": stats["promoted"],
             "scene_finds": stats["scene_finds"],
+            "classified_frames": stats["classified_frames"],
+            "pi_teacher_agreement": {"agree": stats["pi_agree"],
+                                     "disagree": stats["pi_disagree"]},
             "llm_calls": llm_calls, "cache_hits": stats["cache_hits"],
         }
         with open(DATASET_DIR / "manifest.json", "w") as f:
@@ -533,6 +565,10 @@ def main():
     print(f"   Scene finds (B2)  : {scene_total}")
     for name, n in sorted(stats["scene_finds"].items(), key=lambda x: -x[1]):
         print(f"      {name}: {n}")
+    if stats["classified_frames"]:
+        audited = stats["pi_agree"] + stats["pi_disagree"]
+        print(f"   Classified frames : {stats['classified_frames']} "
+              f"(Pi↔teacher agreement: {stats['pi_agree']}/{audited})")
     print(f"   Background negs   : {len(negatives)}")
     print(f"   LLM calls / cache : {llm_calls} / {stats['cache_hits']}")
     if stats["llm_failures"]:

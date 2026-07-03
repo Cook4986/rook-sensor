@@ -63,7 +63,7 @@ Standard message and data rates from your mobile carrier may apply. Carriers are
 
 ## Data Storage
 
-- **On-device:** No persistent image or video storage. The SD card contains only the OS, application code, and configuration. `/tmp` and `/var/log` are RAM disks (tmpfs), cleared on every reboot.
+- **On-device:** No video storage. The SD card contains the OS, application code, configuration, and a rate-limited training archive of still frames (`~/rook-archive/`): motion frames YOLO could not classify, and event-sampled frames with confirmed detections (640×360, with detection-class metadata). Archive frames are synced to the owner's private storage and deleted from the device within 7 days. `/tmp` and `/var/log` are RAM disks (tmpfs), cleared on every reboot.
 - **Beast Cam cache:** Wildlife bounding-box crops are stored temporarily in `~/beast_cam/YYYY-MM-DD/` and deleted from the device immediately after the nightly digest email is confirmed sent.
 - **Cloud (optional, not yet implemented):** A future dashboard feature may store anonymized event metadata in a Supabase Postgres database under the owner's account.
 

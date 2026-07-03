@@ -11,11 +11,16 @@ Rook already produces a continuously-growing, pre-filtered corpus of **local ima
 | Source | Content | Training value |
 |---|---|---|
 | `archive/unclassified/` | Motion that passed the persistence gate but YOLO26n found nothing | Subjects the nano model **misses** — the highest-value recall examples |
+| `archive/classified/` | Event-sampled frames where the Pi **confirmed** detections at conf 0.70, with a `.json` sidecar recording the Pi's verdict | **Refines existing classes** — hard positives of `person`/`car`/`dog` etc. from the deployment viewpoint, plus confirmed `truck`/`bird` parents to mine vendor/species subclasses from. Sidecars enable Pi-vs-teacher agreement auditing |
 | `archive/reclassified/` | Frames where the Mac-side YOLO26l/x pass found objects the Pi missed | Pre-confirmed hard positives with teacher detections |
 | `archive/processed/` | Frames verified to contain nothing | **Hard negatives** — background images that teach the model to stop hallucinating the houselight-as-traffic-light class of errors |
 | `beast_cam/` | Wildlife bounding-box crops | Fine-grained species/subject examples |
 
-Because every frame comes from the deployed camera (same lens, same angle, same lighting cycle), a model fine-tuned on this corpus is refined *for this scene specifically* — the definition of local refinement.
+Because every frame comes from the deployed camera (same lens, same angle, same lighting cycle), a model fine-tuned on this corpus is refined *for this scene specifically* — the definition of local refinement. The unclassified set improves **recall** (what the model misses); the classified set improves **precision and subclass granularity** (sharpening what it already finds); the processed set suppresses **false positives**.
+
+### Classified-detection sampling (edge side)
+
+`rook_engine.py` samples confirmed detections into `~/rook-archive/classified/` on **new-class events** (the same signal that drives daily stats — a class newly entering the scene), rate-limited to one save per 10 minutes. Each save is the *raw* 640×360 frame (never the annotated plot — drawn boxes would poison training) plus a sidecar: `{"pi_classes": [...], "new_classes": [...], "ts": ...}`. The labeler compares the Pi's verdict against the teacher's on these frames and reports the agreement rate in `manifest.json` — persistent per-class disagreement is the signal to grow that class's share of the dataset in the next cycle.
 
 ## Why COCO Cannot Deliver the Target Classes
 
@@ -56,8 +61,8 @@ Cases 1–2 are what make zero-manual-labeling straightforward (detector boxes +
 Pi (edge)                │                                                               │
 ────────                 │  Stage A          Stage B1            Stage C        Stage D  │
 unclassified/  ──sync──▶ │  Teacher YOLO ──▶ VLM crop         ──▶ YOLO dataset ─▶ Fine-  │
-beast_cam/               │  (26l/x, low      classification       (COCO 80 +     tune +  │
-                         │   conf) draws     (vendor vehicles,     custom IDs,   NCNN    │
+classified/              │  (26l/x, low      classification       (COCO 80 +     tune +  │
+beast_cam/               │   conf) draws     (vendor vehicles,     custom IDs,   NCNN    │
                          │   the boxes       specific wildlife)    + background  export  │
                          │        │                                negatives)            │
                          │        └─ no detections? ─▶ Stage B2                          │

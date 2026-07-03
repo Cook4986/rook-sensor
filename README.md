@@ -402,6 +402,7 @@ Rook archives two categories of images on the Pi for downstream model training a
 | Archive | Path on Pi | Content |
 |---|---|---|
 | **Unclassified motion** | `~/rook-archive/unclassified/` | Frames where MOG2 detected motion but YOLO found nothing. Gated by a multi-frame persistence filter. |
+| **Classified detections** | `~/rook-archive/classified/` | Raw frames where YOLO confirmed detections, sampled on new-class events (10-min rate limit) with a JSON sidecar of the Pi's verdict. Refines existing classes in training. |
 | **Beast Cam** | `~/beast_cam/` | Cropped wildlife detections (birds, animals). Auto-purged after 7 days. |
 
 ### Sync to Mac (launchd)
@@ -444,6 +445,7 @@ python3 app/reclassify_archive.py --slack      # send Slack digest of findings
 ```bash
 # Clear old files on the Pi to free SD card space
 ssh rook@rook.local "find ~/rook-archive/unclassified/ -name '*.jpg' -mtime +7 -delete"
+ssh rook@rook.local "find ~/rook-archive/classified/ \( -name '*.jpg' -o -name '*.json' \) -mtime +7 -delete"
 ssh rook@rook.local "find ~/beast_cam/ -name '*.jpg' -mtime +7 -delete"
 ssh rook@rook.local "df -h ~"   # verify space freed
 ```
@@ -454,7 +456,7 @@ ssh rook@rook.local "df -h ~"   # verify space freed
 
 The base YOLO26n model covers 80 COCO classes but cannot distinguish site-specific objects (Amazon van vs. generic truck, trash truck vs. delivery). Rook extends the model using the **unclassified archive as training data**, with **zero manual annotation** — a teacher detector draws the boxes and a vision LLM assigns fine-grained local labels. Full design: [`docs/llm_autolabel_pipeline.md`](docs/llm_autolabel_pipeline.md).
 
-1. **Data mining** — automatic: `archive/unclassified/` + `archive/reclassified/` are the positives; `archive/processed/` provides hard-negative background frames
+1. **Data mining** — automatic: `archive/unclassified/` + `archive/reclassified/` supply subjects the Pi missed (recall), `archive/classified/` supplies Pi-confirmed detections that refine existing classes (precision), and `archive/processed/` provides hard-negative background frames
 2. **Auto-labeling** — `python3 app/llm_autolabel.py`: YOLO26l/x proposes boxes at conf 0.20, then a vision LLM classifies crops into a 28-class local vocabulary — vendor delivery vans (UPS/FedEx/Amazon/USPS/DHL), municipal vehicles (trash truck, street sweeper, school bus), emergency responders, specific wildlife (coyote, fox, deer, raccoon, raptor, cardinal, ...), and `baseball_player` (closed vocabulary, confidence-gated, content-hash cached so each crop is billed once). Frames where the detector found nothing get a **whole-frame screening pass** for missed wildlife and natural phenomena (`downed_tree`, `smoke`, `flood`)
 3. **Fine-tuning** — `python3 app/train_custom_model.py`: transfer learning on `yolo26n.pt` at `imgsz=1088`, with a **release gate** (custom-class mAP minimum + base-class non-regression) before export
 4. **NCNN export** — automatic on gate pass; required to maintain ~150ms inference on the Pi's CPU

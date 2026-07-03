@@ -34,6 +34,7 @@ ARCHIVE_RATE_LIMIT_SECONDS = 600  # Minimum seconds between unclassified frame s
 ARCHIVE_MIN_BLOB_PIXELS    = 800  # Cohesive blob must be ≥ this area (px²) — raised from 500 to reject marginal foliage blobs
 ARCHIVE_MIN_CONCENTRATION  = 0.40 # largest_blob / motion_pixels ratio — tightened from 0.35; wind is diffuse (~0.1–0.2), real subjects ≥0.40
 ARCHIVE_PERSISTENCE_REQ    = 2    # Must trigger on N consecutive qualifying YOLO passes before archiving — filters one-off wind gusts
+CLASSIFIED_RATE_LIMIT_SECONDS = 600  # Min seconds between classified-detection frame saves — samples confirmed detections for training (docs/llm_autolabel_pipeline.md)
 DIGEST_HOUR = 3                 # 3 AM — mathematically least-active hour, minimizes missed captures
 HEARTBEAT_INTERVAL = 6 * 3600  # Slack heartbeat every 6 hours (confirms system alive)
 LOG_FILE = os.path.expanduser("~/rook.log")
@@ -1505,6 +1506,34 @@ def main():
                             daily_stats["animals"] += 1
                         if cls in DELIVERY_CLASSES:
                             daily_stats["deliveries"] += 1
+
+                # ── Classified-detection archive: sample confirmed detections ──
+                # Counterpart of the unclassified archive: raw frames where the
+                # Pi DID detect something at deployment confidence (0.70). These
+                # are hard positives of existing classes from this exact scene —
+                # the auto-label pipeline uses them to refine base classes and
+                # to mine vendor/species subclasses from confirmed parents.
+                # Sampled on new-class events (same signal as daily stats) with
+                # a rate limit; a JSON sidecar records the Pi's verdict as a
+                # weak label so the Mac side can audit Pi-vs-teacher agreement.
+                if new_classes:
+                    now_cls = time.time()
+                    if now_cls - getattr(main, '_last_classified_save', 0) >= CLASSIFIED_RATE_LIMIT_SECONDS:
+                        try:
+                            cls_dir = os.path.expanduser("~/rook-archive/classified")
+                            os.makedirs(cls_dir, exist_ok=True)
+                            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                            # Raw frame, NOT the annotated plot — drawn boxes would poison training
+                            cv2.imwrite(os.path.join(cls_dir, f"classified_{ts}.jpg"),
+                                        cv2.resize(frame, (640, 360)))
+                            with open(os.path.join(cls_dir, f"classified_{ts}.json"), "w") as f:
+                                json.dump({"pi_classes": detected_classes,
+                                           "new_classes": sorted(new_classes),
+                                           "ts": ts}, f)
+                            main._last_classified_save = now_cls
+                            logging.debug(f"   📸 Classified frame archived ({sorted(new_classes)}).")
+                        except Exception as e:
+                            logging.warning(f"Classified archive save failed: {e}")
 
                 # ── Beast Cam: cache wildlife crops (async, non-blocking) ──
                 wildlife_in_frame = [c for c in detected_classes if c in WILDLIFE_CLASSES]
