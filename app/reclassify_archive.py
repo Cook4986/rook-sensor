@@ -115,12 +115,16 @@ def main():
             findings.append({"file": img_path.name, "classes": notable, "score": s})
 
             if not args.dry_run:
-                # Save annotated image
-                annotated = results[0].plot()
-                import numpy as np
-                import cv2 as _cv2
+                # Save the RAW frame to reclassified/ — llm_autolabel.py consumes
+                # this directory as training imagery, and drawn boxes would poison
+                # the dataset. The annotated copy goes to annotated/ for human review.
                 dest = RECLASSIFIED_DIR / img_path.name
-                _cv2.imwrite(str(dest), annotated)
+                shutil.copy2(str(img_path), dest)
+                annotated = results[0].plot()
+                import cv2 as _cv2
+                annotated_dir = RECLASSIFIED_DIR / "annotated"
+                annotated_dir.mkdir(parents=True, exist_ok=True)
+                _cv2.imwrite(str(annotated_dir / img_path.name), annotated)
                 img_path.unlink()  # remove from unclassified after reclassification
         else:
             if not args.dry_run:

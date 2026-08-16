@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Rook Archive Sync — launchd agent
+
+  Replaces the cron entry. launchd agents inherit the user's
+  Full Disk Access grant, so rsync/cp into Dropbox CloudStorage
+  succeeds without "Operation not permitted".
+
+  Install:
+    cp com.rook.sync.plist ~/Library/LaunchAgents/
+    launchctl load ~/Library/LaunchAgents/com.rook.sync.plist
+
+  Remove old cron:
+    crontab -e  →  delete the */15 rook_sync line
+
+  Check status:
+    launchctl list | grep rook
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.rook.sync</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/matthewcook/bin/rook_sync.sh</string>
+    </array>
+
+    <!-- Every 15 minutes (900 seconds) -->
+    <key>StartInterval</key>
+    <integer>900</integer>
+
+    <key>StandardOutPath</key>
+    <string>/tmp/rook_sync.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/tmp/rook_sync.log</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+</dict>
+</plist>

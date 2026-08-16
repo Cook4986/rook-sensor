@@ -47,6 +47,12 @@ Config (~/.env, Mac-side):
     LLM_API_KEY=sk-...                        # unset → Stage B skipped
     LLM_MODEL=gpt-4o-mini                     # vision-capable chat model
     LLM_MIN_CONFIDENCE=0.8                    # below this → keep COCO label
+
+Gemini (via Google's OpenAI-compat endpoint):
+    LLM_API_BASE=https://generativelanguage.googleapis.com/v1beta/openai
+    LLM_API_KEY=<Google AI Studio key>
+    LLM_MODEL=gemini-3.5-flash
+    LLM_REASONING_EFFORT=none                 # don't burn max_tokens on thinking
 """
 
 import os
@@ -77,6 +83,10 @@ CACHE_FILE       = DATASET_DIR / "autolabel_cache.jsonl"
 LLM_API_BASE = os.environ.get("LLM_API_BASE", "https://api.openai.com/v1")
 LLM_API_KEY  = os.environ.get("LLM_API_KEY", "")
 LLM_MODEL    = os.environ.get("LLM_MODEL", "gpt-4o-mini")
+# Reasoning models (e.g. Gemini via the OpenAI-compat endpoint) spend "thinking"
+# tokens against max_tokens; a 100-token budget can come back empty. Set to
+# "none" (or "low") to suppress thinking for these single-JSON-verdict calls.
+LLM_REASONING_EFFORT = os.environ.get("LLM_REASONING_EFFORT", "")
 LLM_MIN_CONF = float(os.environ.get("LLM_MIN_CONFIDENCE", "0.8"))
 # Whole-frame verdicts carry VLM-drawn (approximate) boxes → stricter gate
 SCENE_MIN_CONF = float(os.environ.get("LLM_SCENE_MIN_CONFIDENCE", "0.85"))
@@ -107,6 +117,10 @@ CUSTOM_CLASSES = [
     "raptor", "cardinal", "blue_jay",
     # Natural phenomena — scene-level events (IDs 105-107)
     "downed_tree", "smoke", "flood",
+    # Curbside & service (IDs 108-109) — added Jul 2026. The list is
+    # APPEND-ONLY: existing IDs are a contract with already-written datasets
+    # and deployed models; new classes always go at the end.
+    "trash_bins", "work_truck",
 ]
 
 VISUAL_CUES = {
@@ -142,6 +156,11 @@ VISUAL_CUES = {
     "downed_tree":     "downed tree or large fallen branch across yard, path, or street",
     "smoke":           "smoke or visible fire: plume, haze column, or flames",
     "flood":           "standing or flowing floodwater covering ground/street surfaces",
+    # Curbside & service
+    "trash_bins":      "one or more wheeled curbside carts at the curb/driveway: "
+                       "trash and/or recycling bins, upright, lids closed or open",
+    "work_truck":      "work/contractor vehicle: pickup or van with roof or ladder "
+                       "rack, utility body, toolboxes, equipment, or towing a trailer",
 }
 
 # COCO class → candidate custom subclasses the VLM may promote it to.
@@ -150,10 +169,12 @@ VISUAL_CUES = {
 REFINABLE = {
     # Vehicles
     "truck":  ["trash_truck", "street_sweeper", "ups_truck", "fedex_truck",
-               "amazon_van", "usps_truck", "dhl_van", "fire_truck", "ambulance"],
+               "amazon_van", "usps_truck", "dhl_van", "fire_truck", "ambulance",
+               "work_truck"],
     "bus":    ["trash_truck", "school_bus", "ups_truck", "fedex_truck",
                "amazon_van", "dhl_van", "fire_truck", "ambulance"],
-    "car":    ["amazon_van", "usps_truck", "dhl_van", "police_car", "ambulance"],
+    "car":    ["amazon_van", "usps_truck", "dhl_van", "police_car", "ambulance",
+               "work_truck"],
     # People
     "person": ["baseball_player"],
     # Wildlife (COCO's generic/confused animal classes)
@@ -168,9 +189,15 @@ REFINABLE = {
 
 # Whole-frame (Stage B2) vocabulary: subjects the teacher detector cannot
 # propose — small wildlife it missed entirely, plus non-COCO scene phenomena.
+# "flood" was removed after the Jul 2026 human review: all 22 flood finds were
+# color-cast ground misreads (0/22 real). It stays in CUSTOM_CLASSES (the ID
+# contract is untouched) — B2 just stops proposing it until the camera's
+# white-balance cast is fixed. Every B2 find must pass the human review gate
+# (review_custom_labels.py) before training: the same review measured B2
+# wildlife precision at 1/30.
 SCENE_CLASSES = ["coyote", "fox", "deer", "raccoon", "opossum", "skunk",
                  "squirrel", "rabbit", "wild_turkey", "canada_goose", "raptor",
-                 "downed_tree", "smoke", "flood"]
+                 "downed_tree", "smoke", "trash_bins"]
 
 VAL_FRACTION = 0.15   # deterministic per-image split (hash-based, stable across runs)
 
@@ -254,6 +281,7 @@ def _vlm_round_trip(client: httpx.Client, jpg: bytes, prompt: str, parse_fn):
         "model": LLM_MODEL,
         "temperature": 0,
         "max_tokens": 100,
+        **({"reasoning_effort": LLM_REASONING_EFFORT} if LLM_REASONING_EFFORT else {}),
         "messages": [{
             "role": "user",
             "content": [
@@ -389,10 +417,15 @@ def main():
     #                  carry the Pi's verdict for agreement auditing)
     #   reclassified/  Mac-teacher finds the Pi missed
     #   beast_cam/     wildlife crops — ideal Stage B1 species inputs
+    #   processed/     teacher-empty frames — still screened by Stage B2 for
+    #                  subjects the detector can't propose (small wildlife,
+    #                  smoke/flood/downed_tree); frames that stay empty remain
+    #                  the background-negatives pool
     frames = sorted(set(UNCLASSIFIED_DIR.glob("*.jpg"))
                     | set(CLASSIFIED_DIR.glob("*.jpg"))
                     | set(RECLASSIFIED_DIR.glob("*.jpg"))
-                    | set(BEAST_CAM_DIR.glob("*/*.jpg")))
+                    | set(BEAST_CAM_DIR.glob("*/*.jpg"))
+                    | set(PROCESSED_DIR.glob("*.jpg")))
     if not frames:
         print("   No archive frames to process.")
         return
@@ -407,11 +440,18 @@ def main():
 
     print(f"   Processing {len(frames)} frames (cache: {len(cache)} verdicts)...\n")
 
+    skipped_unreadable = 0
+    labeled_names = set()
     for img_path in frames:
-        results = teacher(str(img_path), conf=TEACHER_CONF, device=device, verbose=False)
+        # Dropbox sync can leave zero-byte/partial JPEGs — skip, don't crash
+        frame = cv2.imread(str(img_path))
+        if frame is None or frame.size == 0:
+            skipped_unreadable += 1
+            print(f"   ⚠️  Skipping unreadable frame: {img_path.name}")
+            continue
+        results = teacher(frame, conf=TEACHER_CONF, device=device, verbose=False)
         boxes = results[0].boxes
         img_h, img_w = results[0].orig_shape
-        frame = cv2.imread(str(img_path))
         labels = []
         is_classified = img_path.parent.name == "classified"
 
@@ -525,9 +565,13 @@ def main():
             write_sample(img_path, labels, split_of(img_path))
         if labels:
             stats["frames"] += 1
+            labeled_names.add(img_path.name)
 
     # ── Background negatives: verified-empty frames teach "nothing here" ─────
-    negatives = sorted(PROCESSED_DIR.glob("*.jpg"))
+    # Exclude frames Stage B2 just labeled — writing them as empty negatives
+    # would overwrite the labeled sample (same filename) and poison training.
+    negatives = sorted(p for p in PROCESSED_DIR.glob("*.jpg")
+                       if p.name not in labeled_names)
     random.seed(0)   # reproducible subset
     if len(negatives) > args.max_negatives:
         negatives = random.sample(negatives, args.max_negatives)
@@ -573,6 +617,8 @@ def main():
     print(f"   LLM calls / cache : {llm_calls} / {stats['cache_hits']}")
     if stats["llm_failures"]:
         print(f"   LLM failures      : {stats['llm_failures']} (kept COCO labels)")
+    if skipped_unreadable:
+        print(f"   Unreadable frames : {skipped_unreadable} (skipped)")
     if not args.dry_run:
         print(f"   Dataset           : {DATASET_DIR}/dataset.yaml")
     print(f"{'=' * 48}\n")

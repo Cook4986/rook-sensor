@@ -2,7 +2,7 @@
 """
 train_custom_model.py — fine-tune YOLO26n on the auto-labeled Rook dataset
 
-Consumes the dataset produced by llm_autolabel.py (COCO 0-79 + custom 80-107),
+Consumes the dataset produced by llm_autolabel.py (COCO 0-79 + custom IDs 80+),
 transfer-learns from yolo26n.pt at the deployment resolution (imgsz=1088),
 gates the release on validation metrics, exports NCNN, and writes a
 model_card.json manifest for auditability (and the future v2 dashboard's
@@ -50,6 +50,8 @@ CUSTOM_CLASSES = [
     "raptor", "cardinal", "blue_jay",
     # Natural phenomena
     "downed_tree", "smoke", "flood",
+    # Curbside & service (append-only — IDs are a contract with existing data)
+    "trash_bins", "work_truck",
 ]
 
 
@@ -89,10 +91,14 @@ def main():
                         help="max allowed mAP50 drop per base class vs previous card")
     parser.add_argument("--force-export", action="store_true",
                         help="export even if the release gate fails")
+    parser.add_argument("--data", default=str(DATASET),
+                        help="dataset.yaml path (use a local-disk copy — training "
+                             "reads through Dropbox File Provider fail intermittently)")
     args = parser.parse_args()
 
-    if not DATASET.exists():
-        raise SystemExit(f"❌ No dataset at {DATASET} — run llm_autolabel.py first.")
+    dataset = Path(args.data)
+    if not dataset.exists():
+        raise SystemExit(f"❌ No dataset at {dataset} — run llm_autolabel.py first.")
 
     from ultralytics import YOLO
     try:
@@ -107,14 +113,14 @@ def main():
           f"imgsz={args.imgsz}, epochs={args.epochs}")
 
     model = YOLO(args.base)
-    model.train(data=str(DATASET), epochs=args.epochs, imgsz=args.imgsz,
+    model.train(data=str(dataset), epochs=args.epochs, imgsz=args.imgsz,
                 device=device, project=str(MODELS_DIR / "runs"),
                 name=f"rook26n_v{version:03d}")
 
     # ── Validate & gate ───────────────────────────────────────────────────────
     best = Path(model.trainer.best)
     trained = YOLO(str(best))
-    val = trained.val(data=str(DATASET), imgsz=args.imgsz, device=device)
+    val = trained.val(data=str(dataset), imgsz=args.imgsz, device=device)
     class_map = per_class_map50(val, trained.names)
 
     failures = []

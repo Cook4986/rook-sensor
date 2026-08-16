@@ -35,6 +35,15 @@ Available when a custom model trained via the [LLM auto-label pipeline](llm_auto
 | `🚨🚓` | `police_car` | Emergency composite — score floor 50 |
 | `🚨🚒` | `fire_truck` | Emergency composite — score floor 50 |
 | `🚨🚑` | `ambulance` | Emergency composite — score floor 50 |
+| `🛻` | `work_truck` | Contractor/utility: pickup or van with roof rack, ladder, utility body, or trailer. Lingers legitimately — `🛻🔒` after 1 h on site |
+
+### Curbside objects (fine-tuned model)
+
+| Emoji | Custom Class | Notes |
+| :---: | :--- | :--- |
+| `🚮` | `trash_bins` | Wheeled curbside carts (trash and/or recycling). **Silent** on detection — only the schedule heuristics alert: |
+| `🚮⏱️` | Bins out too long | Lingering composite — bins still at the curb after 12 h (exponential-backoff re-alerts) |
+| `🚮⚠️` | Bins not out | Trash-day reminder — no bins detected by `TRASH_DEADLINE_HOUR` (default 7 AM) on `TRASH_DAY`; set both in `.env` |
 
 ---
 

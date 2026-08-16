@@ -88,6 +88,8 @@ EMOJI_MAP = {
     "cardinal": "🔴🐦", "blue_jay": "🔵🐦",
     # Natural phenomena — anomaly composites per vocabulary philosophy
     "downed_tree": "🌳⚠️", "smoke": "🔥💨", "flood": "🌊",
+    # Curbside & service
+    "trash_bins": "🚮", "work_truck": "🛻",
 }
 
 
@@ -162,6 +164,9 @@ SCORE_MAP = {
     "downed_tree":    40,   # Storm damage — actionable
     "smoke":         100,   # Critical — fire risk, immediate alert (like bear)
     "flood":          80,   # Critical — property risk
+    # Curbside & service
+    "trash_bins":      3,   # Silent solo — schedule heuristics do the alerting
+    "work_truck":     12,   # Contractor/utility on site — delivery tier
 }
 
 # ── Custom Detection Vocabulary (fine-tuned model only) ──────────────────────
@@ -177,14 +182,17 @@ CUSTOM_WILDLIFE_CLASSES  = {"coyote", "fox", "deer", "raccoon", "opossum",
                             "skunk", "squirrel", "rabbit", "wild_turkey",
                             "canada_goose", "raptor", "cardinal", "blue_jay"}
 CUSTOM_PHENOMENA_CLASSES = {"downed_tree", "smoke", "flood"}
+CUSTOM_SERVICE_CLASSES   = {"work_truck"}   # contractor/utility vehicles
+CUSTOM_CURBSIDE_CLASSES  = {"trash_bins"}   # bins at the curb — schedule-driven alerts
 CUSTOM_CLASSES = (CUSTOM_DELIVERY_CLASSES | CUSTOM_MUNICIPAL_CLASSES
                   | CUSTOM_EMERGENCY_CLASSES | CUSTOM_WILDLIFE_CLASSES
-                  | CUSTOM_PHENOMENA_CLASSES | {"baseball_player"})
+                  | CUSTOM_PHENOMENA_CLASSES | CUSTOM_SERVICE_CLASSES
+                  | CUSTOM_CURBSIDE_CLASSES | {"baseball_player"})
 
 # ── Daily Stats Category Membership ──────────────────────────────────────────
 TRAFFIC_CLASSES    = ({"car", "truck", "bus", "motorcycle", "bicycle"}
                       | CUSTOM_DELIVERY_CLASSES | CUSTOM_MUNICIPAL_CLASSES
-                      | CUSTOM_EMERGENCY_CLASSES)
+                      | CUSTOM_EMERGENCY_CLASSES | CUSTOM_SERVICE_CLASSES)
 
 # Classes fully suppressed from detection — not present in this scene and cause misclassification noise.
 # "train"          🚂  No rail infrastructure nearby — boxy dark vehicle misclassification.
@@ -207,9 +215,16 @@ LINGER_THRESHOLDS = {
     "motorcycle": 1800,  # 30 min  — parked bike
     "bicycle":    1800,  # 30 min  — unattended bicycle
     "person":      300,  # 5 min   — loitering individual
+    # Custom classes (inert on the stock COCO model)
+    "work_truck": 3600,  # 1 hour  — contractor on site (unlike delivery, these DO linger)
+    "trash_bins": 43200, # 12 hours — bins still at the curb long after pickup
 }
 LINGER_ZONE_GRID  = 4    # NxN grid cells for zone comparison (coarser = more tolerant of drift)
-LINGER_COOLDOWN   = 900  # Re-alert at most every 15 min per lingering object (prevents spam)
+# Re-alert backoff: first re-alert LINGER_COOLDOWN after the initial alert, then
+# the interval DOUBLES per re-alert (15m → 30m → 1h → 2h → 4h), capped at
+# LINGER_COOLDOWN_MAX. A car parked all day generates ~6 alerts, not ~30.
+LINGER_COOLDOWN     = 900    # Base re-alert interval (15 min)
+LINGER_COOLDOWN_MAX = 14400  # Backoff ceiling (4 h)
 FORCED_YOLO_INTERVAL = 300  # Seconds between forced YOLO runs bypassing MOG2 gate (catches absorbed objects)
 LINGER_GRACE_FRAMES  = 3    # Tolerate N consecutive missed detections before evicting a lingerer
                             # (covers brief occlusions, confidence oscillation at 0.70, thermal frame-skip gaps)
@@ -222,6 +237,8 @@ LINGER_EMOJI = {
     "motorcycle": "🏍️🔒",  # Parked motorcycle
     "bicycle":    "🚲🔒",   # Unattended bicycle
     "person":     "🚶⏱️",   # Loitering individual / group
+    "work_truck": "🛻🔒",   # Contractor vehicle on site
+    "trash_bins": "🚮⏱️",   # Bins still at the curb
 }
 PEDESTRIAN_CLASSES = {"person", "baseball_player"}
 ANIMAL_CLASSES     = {"bird", "dog", "cat", "bear", "horse"} | CUSTOM_WILDLIFE_CLASSES
@@ -231,7 +248,10 @@ WILDLIFE_CLASSES   = ANIMAL_CLASSES   # Beast Cam crops now include confirmed sp
 # Classes silenced when appearing solo (background noise).
 # Squirrels and rabbits are ubiquitous yard wildlife — counted in daily stats
 # (and Beast Cam crops still cached) but never worth a real-time alert alone.
-SILENT_SOLO_CLASSES = {"car", "bicycle", "horse", "squirrel", "rabbit"}
+# trash_bins is silent on detection: the schedule heuristics (linger threshold
+# + trash-day reminder) are the only bin events worth a notification.
+SILENT_SOLO_CLASSES = {"car", "bicycle", "horse", "squirrel", "rabbit",
+                       "trash_bins"}
 
 
 # ── Scene Fixture Filter ──────────────────────────────────────────────────────
@@ -356,11 +376,15 @@ class LingererTracker:
     Algorithm:
     - On each YOLO inference, map each detected (class, zone) to a first-seen timestamp.
     - If still present and elapsed ≥ LINGER_THRESHOLDS[class] → fire lingering alert (once).
-    - Re-alert after LINGER_COOLDOWN if still present.
-    - On disappearance, evict the entry.
+    - Re-alerts back off exponentially while the object stays put: LINGER_COOLDOWN
+      after the first alert, doubling per re-alert (15m → 30m → 1h → 2h → 4h),
+      capped at LINGER_COOLDOWN_MAX. A still-present object stays visible without
+      flooding the channel.
+    - On disappearance, evict the entry (a fresh linger event starts over at 15m).
     """
     def __init__(self):
-        # key: (class_name, zone) → {"first_seen": float, "last_alerted": float, "miss_count": int}
+        # key: (class_name, zone) → {"first_seen": float, "last_alerted": float,
+        #                            "alert_count": int, "miss_count": int}
         self._tracked: dict = {}
 
     def _zone(self, cx_norm: float, cy_norm: float) -> tuple:
@@ -391,7 +415,8 @@ class LingererTracker:
             current_keys.add(key)
 
             if key not in self._tracked:
-                self._tracked[key] = {"first_seen": now, "last_alerted": 0, "miss_count": 0}
+                self._tracked[key] = {"first_seen": now, "last_alerted": 0,
+                                      "alert_count": 0, "miss_count": 0}
             else:
                 self._tracked[key]["miss_count"] = 0  # Re-detected → reset miss counter
 
@@ -421,14 +446,21 @@ class LingererTracker:
             elapsed = now - state["first_seen"]
             since_alert = now - state["last_alerted"]
 
-            if elapsed >= threshold and since_alert >= LINGER_COOLDOWN:
+            # Exponential backoff: each re-alert doubles the wait, capped.
+            cooldown = min(LINGER_COOLDOWN * (2 ** max(0, state.get("alert_count", 0) - 1)),
+                           LINGER_COOLDOWN_MAX)
+
+            if elapsed >= threshold and since_alert >= cooldown:
                 mins = int(elapsed // 60)
+                dwell = f"{mins / 60:.1f}h" if mins >= 90 else f"{mins}min"
                 # Use LINGER_EMOJI for contextual loitering symbols (e.g. 🗑️🚚 for truck at curb)
                 linger_sym = LINGER_EMOJI.get(cls_name, EMOJI_MAP.get(cls_name, f"[{cls_name}]"))
-                alert = f"{linger_sym} {cls_name.capitalize()} lingering {mins}min"
+                alert = f"{linger_sym} {cls_name.replace('_', ' ').capitalize()} lingering {dwell}"
                 alerts.append(alert)
                 state["last_alerted"] = now
-                logging.info(f"   ⏱️  Lingering alert: {alert}")
+                state["alert_count"] = state.get("alert_count", 0) + 1
+                logging.info(f"   ⏱️  Lingering alert: {alert} "
+                             f"(next re-alert ≥ {min(LINGER_COOLDOWN * (2 ** (state['alert_count'] - 1)), LINGER_COOLDOWN_MAX) // 60}min)")
 
         return alerts
 
@@ -674,7 +706,8 @@ def calculate_image_score(detected_classes, weather_bonus: int = 0):
 
     heavy = (counts.get("truck", 0) + counts.get("bus", 0)
              + sum(counts.get(c, 0) for c in CUSTOM_DELIVERY_CLASSES)
-             + sum(counts.get(c, 0) for c in CUSTOM_MUNICIPAL_CLASSES))
+             + sum(counts.get(c, 0) for c in CUSTOM_MUNICIPAL_CLASSES)
+             + sum(counts.get(c, 0) for c in CUSTOM_SERVICE_CLASSES))
     if heavy >= 1:
         score += 20   # Multiple heavy vehicles: fire response, utility, crash
         score = max(score, 30)
@@ -1249,6 +1282,19 @@ def main():
     last_daytime_check = time.time()
     last_thermal_check = 0
     last_digest_date = None
+
+    # ── Trash-day schedule (custom model only — needs the trash_bins class) ──
+    # TRASH_DAY in .env enables the "bins not out" reminder: weekday number
+    # 0=Monday … 6=Sunday. TRASH_DEADLINE_HOUR (default 7) is the local hour by
+    # which bins should be visible at the curb on pickup day. The complementary
+    # "bins out too long" alert needs no schedule — it's LINGER_THRESHOLDS
+    # ["trash_bins"] (12 h) via the LingererTracker.
+    _trash_day_env = os.environ.get("TRASH_DAY", "").strip()
+    trash_day = int(_trash_day_env) if _trash_day_env.isdigit() else None
+    trash_deadline_hour = int(os.environ.get("TRASH_DEADLINE_HOUR", "7"))
+    bins_detectable = "trash_bins" in _model_classes
+    bins_last_seen = 0.0          # Timestamp of the last trash_bins detection
+    bins_reminder_date = None     # Guard: at most one reminder per pickup day
     last_heartbeat = time.time()  # Prevents immediate heartbeat on startup
     last_forced_yolo = 0          # Timestamp of last periodic forced-YOLO run
     warmup_frame_count = 0        # MOG2 warmup: skip first 30 frames (no background model yet)
@@ -1376,6 +1422,22 @@ def main():
                 best_daily_image = {"score": 0, "path": None, "summary": ""}
                 fixture_filter.reset()  # Re-learn fixtures daily — allows scene changes to propagate
 
+            # ── Trash-day reminder: bins not at the curb by the deadline ───
+            # Fires once per pickup day if no trash_bins detection has been
+            # seen in the last 12 h. Requires TRASH_DAY in .env and a custom
+            # model with the trash_bins class — otherwise fully inert.
+            if (bins_detectable and trash_day is not None
+                    and datetime.now().weekday() == trash_day
+                    and now_hour >= trash_deadline_hour
+                    and bins_reminder_date != today_date):
+                bins_reminder_date = today_date
+                if time.time() - bins_last_seen > 43200:
+                    reminder = "🚮⚠️ Trash bins not detected at curb — pickup day"
+                    logging.info(f"   {reminder}")
+                    threading.Thread(target=send_slack_alert,
+                                     args=(reminder,), daemon=True).start()
+                    daily_emoji_log.append((datetime.now().strftime("%H:%M"), reminder))
+
             if now_hour == DIGEST_HOUR and last_digest_date != today_date:
                 # Digest covers the *previous* calendar day (midnight→midnight), not the
                 # sparse 12am–3am window of the current day.
@@ -1494,6 +1556,10 @@ def main():
                 # ── Update daily stats (Event-based) ───────────────────────
                 # Count an event when a class newly appears in the scene to accurately
                 # track all non-notification events without inflating per-frame counts.
+                # Track bin presence for the trash-day reminder
+                if "trash_bins" in detected_classes:
+                    bins_last_seen = time.time()
+
                 new_classes = set(detected_classes) - set(last_detected_classes)
                 if new_classes:
                     daily_stats["total_events"] += 1

@@ -49,7 +49,7 @@ Identified hardware and software improvements from prototyping, assembly, and li
 - **v2:** `rook-dashboard` (Next.js + Supabase + Vercel) for remote `.env` management, viewfinder, and threshold tuning without SSH. Model provenance view backed by the `model_card.json` manifests produced by the custom-training pipeline (maps 1:1 onto a `model_versions` table).
 
 ### 5. Custom Detection Vocabulary — **Pipeline implemented**
-- **Current:** LLM auto-label pipeline ([design](llm_autolabel_pipeline.md)) turns the unclassified archive + Beast Cam crops into training data with no manual annotation. A 28-class local vocabulary (IDs 80–107): granular vehicles (trash truck, street sweeper, UPS/FedEx/Amazon/USPS/DHL, school bus, police/fire/ambulance), `baseball_player`, specific wildlife (coyote, fox, deer, raccoon, opossum, skunk, squirrel, rabbit, wild turkey, Canada goose, raptor, cardinal, blue jay), and natural phenomena (downed tree, smoke, flood). Teacher detector (YOLO26l/x) draws boxes and a vision LLM classifies crops; zero-detection frames get whole-frame VLM screening with approximate boxes. Fine-tune + release gate + NCNN export via `train_custom_model.py`; versioned deploy with health-check rollback via `deploy_model_to_pi.sh`. Engine maps are pre-wired and inert until a custom model is live.
+- **Current:** LLM auto-label pipeline ([design](llm_autolabel_pipeline.md)) turns the unclassified archive + Beast Cam crops into training data with no manual annotation. A 30-class local vocabulary (IDs 80–109, append-only): granular vehicles (trash truck, street sweeper, UPS/FedEx/Amazon/USPS/DHL, school bus, police/fire/ambulance, work truck), `baseball_player`, specific wildlife (coyote, fox, deer, raccoon, opossum, skunk, squirrel, rabbit, wild turkey, Canada goose, raptor, cardinal, blue jay), natural phenomena (downed tree, smoke, flood), and curbside objects (trash bins — schedule-driven alerts). All VLM-promoted labels pass a **human review gate** (`review_custom_labels.py`) before training — the Jul 2026 audit measured 1/30 precision on unreviewed whole-frame wildlife finds and retired `flood` from screening. Teacher detector (YOLO26l/x) draws boxes and a vision LLM classifies crops; zero-detection frames get whole-frame VLM screening with approximate boxes. Fine-tune + release gate + NCNN export via `train_custom_model.py`; versioned deploy with health-check rollback via `deploy_model_to_pi.sh`. Engine maps are pre-wired and inert until a custom model is live.
 - **Closes:** the `LINGER_THRESHOLDS` truck gap — trash/delivery trucks alert on positive identification (score path), so the 2–5 min stop cycle no longer needs a lingering threshold.
 - **Relates to §2 Wildlife Species Resolution:** confirmed species detection at inference time supersedes the COCO-proxy heuristics (solo-dog≈coyote, sheep/cow→deer, HSV bird colors) and complements the post-Hailo EfficientNet plan — coarse species live now, finer species ID later.
 
@@ -103,6 +103,8 @@ See proposed design in [Rook — Project Overview §8: Lingering Object Detectio
 | `motorcycle` | 30 min | `🏍️🔒` Parked bike |
 | `bicycle` | 30 min | `🚲🔒` Unattended bike |
 | `person` | 5 min | `🚶⏱️` Loitering individual |
+| `work_truck` (custom model) | 60 min | `🛻🔒` Contractor on site |
+| `trash_bins` (custom model) | 12 h | `🚮⏱️` Bins still at the curb |
 
 **Lifecycle example — Trash Day:**
 1. ~6 AM: Resident wheels bins to curb → MOG2 fires → YOLO detects person + motion → `🚶` alert
@@ -110,7 +112,7 @@ See proposed design in [Rook — Project Overview §8: Lingering Object Detectio
 3. After 60 min: `🗑️🚚 Truck lingering 63min` → Slack alert (trash truck confirmed)
 4. ~8 AM: Truck arrives, picks up bins, drives away → fresh motion → `🚚` alert + lingerer evicted
 
-**Re-alert cooldown:** 15 min per object — prevents spam if truck idles.
+**Re-alert backoff:** exponential per object — 15 min after the first alert, doubling each re-alert (15m → 30m → 1h → 2h → 4h cap). A car parked all day yields ~6 notifications instead of ~30; eviction resets the schedule.
 
 **SceneFixtureFilter:** Auto-suppresses any (class, zone) appearing in ≥80% of 60 consecutive inferences. Resets daily. The houselight `🚦 traffic light` misclassification self-suppresses after ~60 motion events.
 
