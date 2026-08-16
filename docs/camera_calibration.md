@@ -45,3 +45,32 @@ To save processing power, Rook ignores background motion (like trees swaying in 
 4. This information will be entered into your Rook configuration to establish a **Zone Mask**, telling the motion detector to completely ignore that section of the screen.
 
 Once you are happy with the framing, focus, and masking, you are ready to begin active monitoring!
+
+## Tuning: libcamera IPA file and color processing (added 2026-08-16)
+
+The B0444 (IMX462 Pivariety) makes libcamera log
+`Configuration file 'arducam-pivariety.json' not found for IPA module 'rpi/pisp'` at
+startup. Arducam calls this cosmetic — tuning parameters live in the camera's onboard
+MCU and the driver falls back to them. In practice (2026-08-16 A/B, frames in the
+workspace `Media/` as `before_tuning.jpg`/`after_tuning.jpg`) the MCU fallback produced
+acceptable bright-daylight color.
+
+We installed the community-standard file anyway, because a file on disk is inspectable
+and editable where MCU-internal tuning is not:
+
+```bash
+sudo cp /usr/share/libcamera/ipa/rpi/pisp/imx290.json \
+        /usr/share/libcamera/ipa/rpi/pisp/arducam-pivariety.json
+```
+
+(IMX462 is the IMX290 sensor family.) If a color cast reappears — most likely at
+dawn/dusk — edit that file: `rpi.awb` (try `"bayes": 0` for greyworld mode) and
+`rpi.alsc` (lens shading; can be disabled by renaming to `disable.rpi.alsc`) are the
+levers. Delete the file to revert to MCU fallback.
+
+Facts ruled in/out (2026-08-16): the B0444 has an **integral IR-cut filter** (visible
+light only, per Arducam spec), so raw IR contamination is unlikely — though the 141°
+lens can leak some IR at steep angles near frame edges. The dominant image-quality
+problem visible in the A/B frames was **window glare/reflections** from a lens hood not
+flush against the glass (see the Phase 2 checklist above) — fix that physically before
+chasing color further.
