@@ -101,7 +101,7 @@ Vision LLMs are unreliable at emitting pixel-accurate coordinates but excellent 
 | VLM boxes are imprecise (Stage B2) | Stricter 0.85 confidence gate; box geometry validated and clamped; minimum-area floor rejects boxes too small for a rough box to be useful training signal |
 | Teacher false positives become training data | Teacher conf 0.20 proposals are only *promoted* to custom labels by the VLM; un-refined proposals below 0.35 are discarded from the dataset |
 | Base-class forgetting | Dataset keeps all 80 COCO IDs, includes local COCO-labeled boxes and background negatives; release gate checks base-class mAP against the previous model |
-| Cost runaway | Content-hash cache (`autolabel_cache.jsonl`) covers crops *and* whole frames, shared `--max-crops` budget, uploads resized to ≤512px |
+| Cost runaway | Content-hash cache (`autolabel_cache.jsonl`) covers crops *and* whole frames, shared `--max-crops` budget, optional `--max-usd` spend cap (needs `LLM_PRICE_*_PER_1M` set — real pricing, never guessed), 429 backoff so a rate limit doesn't burn retries, uploads resized to ≤384px |
 | Silent drift | `model_card.json` + Slack digest after every labeling/training run; dataset manifests are append-only and auditable |
 
 ### Human effort
@@ -154,9 +154,18 @@ The detection update was checked against the three forward-looking specs. Findin
 # OpenAI-compatible endpoint (OpenAI, OpenRouter, or local Ollama/vLLM)
 LLM_API_BASE=https://api.openai.com/v1
 LLM_API_KEY=sk-...
-LLM_MODEL=gpt-4o-mini              # any vision-capable chat model
+LLM_MODEL=gpt-4o-mini              # any vision-capable chat model, both stages
+LLM_MODEL_B1=                      # optional override: Stage B1 crop classification
+LLM_MODEL_B2=                      # optional override: Stage B2 whole-frame screening
+                                   # (both default to LLM_MODEL — B2 is closer to
+                                   # detection than classification, so a newer
+                                   # "Flash"-tier model that improves B1 may regress B2)
 LLM_MIN_CONFIDENCE=0.8             # Stage B1: below this, crop keeps its COCO label
 LLM_SCENE_MIN_CONFIDENCE=0.85      # Stage B2: stricter — VLM boxes are approximate
+LLM_CROP_MAX_PX=384                # Stage B1 crop upload cap, longest edge
+LLM_PRICE_INPUT_PER_1M=            # USD/1M input tokens — set from your provider's
+LLM_PRICE_OUTPUT_PER_1M=           # pricing page to make --max-usd enforce a real cap;
+                                   # left unset (0) by default rather than guessing
 ```
 
 Or Gemini, via Google's OpenAI-compatibility endpoint:
