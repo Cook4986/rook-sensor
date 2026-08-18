@@ -40,13 +40,29 @@ Usage:
     python3 llm_autolabel.py                  # label everything new
     python3 llm_autolabel.py --dry-run        # report without writing dataset
     python3 llm_autolabel.py --max-crops 200  # cap LLM calls this run
+    python3 llm_autolabel.py --max-usd 5.00   # stop once estimated spend hits $5
+                                               # (requires LLM_PRICE_*_PER_1M below)
     python3 llm_autolabel.py --slack          # send Slack digest when done
 
 Config (~/.env, Mac-side):
     LLM_API_BASE=https://api.openai.com/v1    # any OpenAI-compatible endpoint
     LLM_API_KEY=sk-...                        # unset → Stage B skipped
-    LLM_MODEL=gpt-4o-mini                     # vision-capable chat model
+    LLM_MODEL=gpt-4o-mini                     # vision-capable chat model, both stages
+    LLM_MODEL_B1=                             # override: Stage B1 crop classification
+    LLM_MODEL_B2=                             # override: Stage B2 whole-frame screening
+                                               # (both default to LLM_MODEL; split matters
+                                               # because B2 is closer to detection than
+                                               # classification, and newer "Flash"-tier
+                                               # models may regress on it even as they
+                                               # improve at B1)
     LLM_MIN_CONFIDENCE=0.8                    # below this → keep COCO label
+    LLM_CROP_MAX_PX=384                       # longest-edge cap for Stage B1 crop uploads
+    LLM_PRICE_INPUT_PER_1M=                   # USD per 1M input tokens — required for
+    LLM_PRICE_OUTPUT_PER_1M=                  # USD per 1M output tokens — --max-usd to
+                                               # actually enforce a cap; left unset (0) by
+                                               # default rather than guessing a provider's
+                                               # current rate. Check your provider's
+                                               # pricing page and set both.
 
 Gemini (via Google's OpenAI-compat endpoint):
     LLM_API_BASE=https://generativelanguage.googleapis.com/v1beta/openai
@@ -57,6 +73,7 @@ Gemini (via Google's OpenAI-compat endpoint):
 
 import os
 import re
+import time
 import json
 import base64
 import hashlib
@@ -83,6 +100,12 @@ CACHE_FILE       = DATASET_DIR / "autolabel_cache.jsonl"
 LLM_API_BASE = os.environ.get("LLM_API_BASE", "https://api.openai.com/v1")
 LLM_API_KEY  = os.environ.get("LLM_API_KEY", "")
 LLM_MODEL    = os.environ.get("LLM_MODEL", "gpt-4o-mini")
+# Stage B1 (crop classification) and B2 (whole-frame screening) are different
+# tasks — B2 is closer to detection, which newer "Flash"-tier models can
+# regress on even as they improve at B1 — so they're independently overridable.
+# Both default to LLM_MODEL: a config with only LLM_MODEL set is unaffected.
+LLM_MODEL_B1 = os.environ.get("LLM_MODEL_B1", "") or LLM_MODEL
+LLM_MODEL_B2 = os.environ.get("LLM_MODEL_B2", "") or LLM_MODEL
 # Reasoning models (e.g. Gemini via the OpenAI-compat endpoint) spend "thinking"
 # tokens against max_tokens; a 100-token budget can come back empty. Set to
 # "none" (or "low") to suppress thinking for these single-JSON-verdict calls.
@@ -93,6 +116,16 @@ SCENE_MIN_CONF = float(os.environ.get("LLM_SCENE_MIN_CONFIDENCE", "0.85"))
 SCENE_MIN_BOX_AREA = 0.003   # normalized area floor — matches the archive's
                              # 800px² persistence gate at 640×360; rejects
                              # boxes too small for a rough VLM box to be useful
+
+# Longest-edge cap (px) for Stage B1 crop uploads — livery/species ID doesn't
+# need more detail than this, and it's the single biggest per-call cost lever.
+LLM_CROP_MAX_PX = int(os.environ.get("LLM_CROP_MAX_PX", "384"))
+
+# Cost estimation is opt-in: left at 0 (unconfigured) rather than hardcoding a
+# provider's current rate, which this codebase has no way to verify is still
+# accurate. Set both from your provider's pricing page to make --max-usd real.
+LLM_PRICE_INPUT_PER_1M  = float(os.environ.get("LLM_PRICE_INPUT_PER_1M", "0") or "0")
+LLM_PRICE_OUTPUT_PER_1M = float(os.environ.get("LLM_PRICE_OUTPUT_PER_1M", "0") or "0")
 
 # Teacher proposals: same low threshold as reclassify_archive.py to catch
 # faint/distant subjects; boxes NOT promoted by the VLM must clear a higher
@@ -274,11 +307,23 @@ def _parse_scene_verdict(text: str):
             "box": [round(v, 4) for v in (x1, y1, x2, y2)]}
 
 
-def _vlm_round_trip(client: httpx.Client, jpg: bytes, prompt: str, parse_fn):
-    """Shared VLM call with one retry; parse failures fall through to None."""
+RATE_LIMIT_MAX_RETRIES = 5     # separate budget from ordinary-failure retries below
+RATE_LIMIT_BASE_BACKOFF = 1.0  # seconds; doubles each retry, capped at 30s + jitter
+NON_429_MAX_ATTEMPTS = 2       # unchanged from the original "one retry" behavior
+
+
+def _vlm_round_trip(client: httpx.Client, jpg: bytes, prompt: str, parse_fn, model: str):
+    """Shared VLM call. Returns (verdict, usage) — verdict is None on failure,
+    usage is {"prompt_tokens", "completion_tokens"} (zeros if unavailable).
+
+    Two independent retry budgets: 429s back off exponentially (honoring
+    Retry-After when the provider sends one) and don't count against the
+    ordinary-failure budget, since a rate limit isn't a broken request — it's
+    the request working as intended, just needing to wait.
+    """
     b64 = base64.b64encode(jpg).decode()
     payload = {
-        "model": LLM_MODEL,
+        "model": model,
         "temperature": 0,
         "max_tokens": 100,
         **({"reasoning_effort": LLM_REASONING_EFFORT} if LLM_REASONING_EFFORT else {}),
@@ -291,30 +336,55 @@ def _vlm_round_trip(client: httpx.Client, jpg: bytes, prompt: str, parse_fn):
             ],
         }],
     }
-    for _ in range(2):
+    usage = {"prompt_tokens": 0, "completion_tokens": 0}
+    backoff = RATE_LIMIT_BASE_BACKOFF
+    rate_limit_retries = 0
+    attempts = 0
+    while attempts < NON_429_MAX_ATTEMPTS:
         try:
             r = client.post(f"{LLM_API_BASE}/chat/completions", json=payload, timeout=60)
+        except httpx.HTTPError:
+            attempts += 1
+            continue
+        if r.status_code == 429:
+            if rate_limit_retries >= RATE_LIMIT_MAX_RETRIES:
+                break
+            retry_after = r.headers.get("Retry-After")
+            try:
+                wait = float(retry_after) if retry_after else backoff
+            except ValueError:
+                wait = backoff
+            time.sleep(min(wait + random.uniform(0, 0.5), 30))
+            backoff = min(backoff * 2, 16)
+            rate_limit_retries += 1
+            continue
+        try:
             r.raise_for_status()
-            verdict = parse_fn(r.json()["choices"][0]["message"]["content"])
+            body = r.json()
+            u = body.get("usage") or {}
+            usage["prompt_tokens"] = u.get("prompt_tokens", 0)
+            usage["completion_tokens"] = u.get("completion_tokens", 0)
+            verdict = parse_fn(body["choices"][0]["message"]["content"])
             if verdict is not None:
-                return verdict
+                return verdict, usage
         except httpx.HTTPError:
             pass
-    return None
+        attempts += 1
+    return None, usage
 
 
 def classify_frame(client: httpx.Client, frame_jpg: bytes):
-    """Stage B2: whole-frame screening. Returns {"label","confidence","box"} or None."""
-    return _vlm_round_trip(client, frame_jpg, _scene_prompt(), _parse_scene_verdict)
+    """Stage B2: whole-frame screening. Returns ({"label","confidence","box"} or None, usage)."""
+    return _vlm_round_trip(client, frame_jpg, _scene_prompt(), _parse_scene_verdict, LLM_MODEL_B2)
 
 
 def classify_crop(client: httpx.Client, crop_jpg: bytes, parent_class: str, candidates: list):
-    """Stage B1: one crop-classification round-trip. Returns {"label","confidence"}
-    or None on failure — malformed responses are retried once, then dropped
-    (caller falls back to the COCO label); a bad label is worse than no label.
+    """Stage B1: one crop-classification round-trip. Returns ({"label","confidence"} or
+    None, usage) — malformed responses are retried once, then dropped (caller falls
+    back to the COCO label); a bad label is worse than no label.
     """
     return _vlm_round_trip(client, crop_jpg, _crop_prompt(parent_class, candidates),
-                           lambda text: _parse_verdict(text, candidates))
+                           lambda text: _parse_verdict(text, candidates), LLM_MODEL_B1)
 
 
 # ── Verdict cache (content-addressed — each crop billed once, ever) ──────────
@@ -382,6 +452,11 @@ def main():
                         help="teacher YOLO26 size (default: l)")
     parser.add_argument("--max-crops", type=int, default=1000,
                         help="max NEW crops sent to the LLM this run (cost budget)")
+    parser.add_argument("--max-usd", type=float, default=None,
+                        help="stop new LLM calls once estimated spend hits this many "
+                             "dollars (requires LLM_PRICE_INPUT_PER_1M/"
+                             "LLM_PRICE_OUTPUT_PER_1M to be set — otherwise a warning "
+                             "is printed and the cap is NOT enforced)")
     parser.add_argument("--max-negatives", type=int, default=300,
                         help="max background negatives from processed/")
     parser.add_argument("--dry-run", action="store_true",
@@ -398,7 +473,16 @@ def main():
         print("⚠️  LLM_API_KEY not set — Stage B (VLM refinement) will be SKIPPED.")
         print("   Dataset will contain teacher labels only (no custom classes).")
 
-    print(f"🏷️  Rook Auto-Label — teacher yolo26{args.model}.pt, VLM {LLM_MODEL}")
+    usd_priced = LLM_PRICE_INPUT_PER_1M > 0 or LLM_PRICE_OUTPUT_PER_1M > 0
+    usd_enforced = args.max_usd is not None and usd_priced
+    if args.max_usd is not None and not usd_priced:
+        print(f"⚠️  --max-usd {args.max_usd:.4f} set but LLM_PRICE_INPUT_PER_1M/"
+              f"LLM_PRICE_OUTPUT_PER_1M are both unset (0) — cost cannot be estimated, "
+              f"so this run will NOT stop on spend. Set both from your provider's "
+              f"current pricing page to enforce it.")
+
+    vlm_label = LLM_MODEL if LLM_MODEL_B1 == LLM_MODEL_B2 else f"B1={LLM_MODEL_B1} B2={LLM_MODEL_B2}"
+    print(f"🏷️  Rook Auto-Label — teacher yolo26{args.model}.pt, VLM {vlm_label}")
     try:
         import torch
         device = "mps" if torch.backends.mps.is_available() else "cpu"
@@ -434,9 +518,28 @@ def main():
     client = httpx.Client(headers={"Authorization": f"Bearer {LLM_API_KEY}"})
 
     llm_calls = 0
+    tokens_in = 0
+    tokens_out = 0
+    cost_so_far = 0.0
+    budget_msg_printed = False
     stats = {"frames": 0, "boxes": 0, "promoted": {}, "scene_finds": {},
              "cache_hits": 0, "llm_failures": 0,
              "classified_frames": 0, "pi_agree": 0, "pi_disagree": 0}
+
+    def budget_left() -> bool:
+        nonlocal budget_msg_printed
+        if llm_calls >= args.max_crops:
+            if not budget_msg_printed:
+                print(f"   💰 --max-crops {args.max_crops} reached — no further LLM calls this run.")
+                budget_msg_printed = True
+            return False
+        if usd_enforced and cost_so_far >= args.max_usd:
+            if not budget_msg_printed:
+                print(f"   💰 --max-usd {args.max_usd:.4f} reached (est. ${cost_so_far:.4f}) — "
+                      f"no further LLM calls this run.")
+                budget_msg_printed = True
+            return False
+        return True
 
     print(f"   Processing {len(frames)} frames (cache: {len(cache)} verdicts)...\n")
 
@@ -466,8 +569,8 @@ def main():
                 if crop.size == 0 or min(crop.shape[:2]) < 24:
                     verdict = None   # too small to classify — keep COCO label
                 else:
-                    # Cap upload size — 512px longest edge is plenty for livery ID
-                    scale = 512 / max(crop.shape[:2])
+                    # Cap upload size — 384px longest edge is plenty for livery ID
+                    scale = LLM_CROP_MAX_PX / max(crop.shape[:2])
                     if scale < 1.0:
                         crop = cv2.resize(crop, (max(1, int(crop.shape[1] * scale)),
                                                  max(1, int(crop.shape[0] * scale))))
@@ -478,10 +581,14 @@ def main():
                     if crop_hash and crop_hash in cache:
                         verdict = cache[crop_hash]
                         stats["cache_hits"] += 1
-                    elif crop_hash and llm_calls < args.max_crops:
-                        verdict = classify_crop(client, jpg.tobytes(), cls_name,
-                                                REFINABLE[cls_name])
+                    elif crop_hash and budget_left():
+                        verdict, usage = classify_crop(client, jpg.tobytes(), cls_name,
+                                                       REFINABLE[cls_name])
                         llm_calls += 1
+                        tokens_in += usage["prompt_tokens"]
+                        tokens_out += usage["completion_tokens"]
+                        cost_so_far += (usage["prompt_tokens"] / 1e6) * LLM_PRICE_INPUT_PER_1M \
+                                     + (usage["completion_tokens"] / 1e6) * LLM_PRICE_OUTPUT_PER_1M
                         if verdict is None:
                             stats["llm_failures"] += 1
                         else:
@@ -519,11 +626,15 @@ def main():
             if frame_hash in cache:
                 verdict = cache[frame_hash]
                 stats["cache_hits"] += 1
-            elif llm_calls < args.max_crops:
+            elif budget_left():
                 ok, jpg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
                 if ok:
-                    verdict = classify_frame(client, jpg.tobytes())
+                    verdict, usage = classify_frame(client, jpg.tobytes())
                     llm_calls += 1
+                    tokens_in += usage["prompt_tokens"]
+                    tokens_out += usage["completion_tokens"]
+                    cost_so_far += (usage["prompt_tokens"] / 1e6) * LLM_PRICE_INPUT_PER_1M \
+                                 + (usage["completion_tokens"] / 1e6) * LLM_PRICE_OUTPUT_PER_1M
                     if verdict is None:
                         stats["llm_failures"] += 1
                     else:
@@ -582,9 +693,11 @@ def main():
         manifest = {
             "generated": datetime.now().isoformat(timespec="seconds"),
             "teacher": f"yolo26{args.model}.pt", "teacher_conf": TEACHER_CONF,
-            "vlm": LLM_MODEL if LLM_API_KEY else None,
+            "vlm_b1": LLM_MODEL_B1 if LLM_API_KEY else None,
+            "vlm_b2": LLM_MODEL_B2 if LLM_API_KEY else None,
             "vlm_min_confidence": LLM_MIN_CONF,
             "scene_min_confidence": SCENE_MIN_CONF,
+            "crop_max_px": LLM_CROP_MAX_PX,
             "labeled_frames": stats["frames"], "boxes": stats["boxes"],
             "negatives": len(negatives), "promoted": stats["promoted"],
             "scene_finds": stats["scene_finds"],
@@ -592,6 +705,9 @@ def main():
             "pi_teacher_agreement": {"agree": stats["pi_agree"],
                                      "disagree": stats["pi_disagree"]},
             "llm_calls": llm_calls, "cache_hits": stats["cache_hits"],
+            "tokens_in": tokens_in, "tokens_out": tokens_out,
+            "estimated_cost_usd": round(cost_so_far, 4) if usd_priced else None,
+            "max_usd_cap": args.max_usd if usd_enforced else None,
         }
         with open(DATASET_DIR / "manifest.json", "w") as f:
             json.dump(manifest, f, indent=2)
@@ -615,6 +731,9 @@ def main():
               f"(Pi↔teacher agreement: {stats['pi_agree']}/{audited})")
     print(f"   Background negs   : {len(negatives)}")
     print(f"   LLM calls / cache : {llm_calls} / {stats['cache_hits']}")
+    if tokens_in or tokens_out:
+        cost_str = f"est. ${cost_so_far:.4f}" if usd_priced else "cost unpriced (set LLM_PRICE_*_PER_1M)"
+        print(f"   Tokens in / out   : {tokens_in} / {tokens_out} ({cost_str})")
     if stats["llm_failures"]:
         print(f"   LLM failures      : {stats['llm_failures']} (kept COCO labels)")
     if skipped_unreadable:
@@ -629,11 +748,12 @@ def main():
             combined[k] = combined.get(k, 0) + v
         summary = "  ".join(f"{k} ×{v}" for k, v in
                             sorted(combined.items(), key=lambda x: -x[1]))
+        cost_note = f", est. ${cost_so_far:.4f}" if usd_priced else ""
         send_slack(f"🏷️ *Rook Auto-Label* — {stats['frames']} frames → "
                    f"{stats['boxes']} boxes ({promoted_total} crop promotions, "
                    f"{scene_total} whole-frame finds)\n"
                    f"   {summary or 'no custom classes found'}\n"
-                   f"   LLM calls: {llm_calls} (cache hits: {stats['cache_hits']}) — "
+                   f"   LLM calls: {llm_calls} (cache hits: {stats['cache_hits']}{cost_note}) — "
                    f"dataset at `archive/autolabel/`")
         print("💬 Slack digest sent.")
 
