@@ -16,6 +16,20 @@
 
   Check status:
     launchctl list | grep rook
+
+  ProgramArguments MUST point at ~/bin/rook_sync.sh, not at the repo copy:
+  launchd cannot execute a script out of ~/Library/CloudStorage/Dropbox
+  ("Operation not permitted" — verified 2026-08-18), even though the same job
+  can write into Dropbox.
+
+  Install BOTH this plist and that local copy with install_mac_sync.sh — never
+  hand-copy either one. The copy is taken at install time and is NOT refreshed
+  per run, so after editing sync_archive.sh you must re-run the installer or the
+  schedule keeps executing the old code. A hand-copied fork living there froze at
+  May 2026 and silently starved the pipeline of classified/ frames until
+  2026-08-18, when 1,151 stranded frames were recovered. sync_archive.sh prints
+  its own installed mtime and writes archive/.sync_status.json so this drift is
+  visible instead of silent.
 -->
 <plist version="1.0">
 <dict>

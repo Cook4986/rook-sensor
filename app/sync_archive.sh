@@ -20,9 +20,21 @@
 #   3. Migrate from cron to launchd for FDA inheritance:
 #
 #      crontab -e  →  remove the old */15 line
-#      cp ~/Library/CloudStorage/Dropbox/Rook/rook-sensor/app/com.rook.sync.plist \
-#         ~/Library/LaunchAgents/
-#      launchctl load ~/Library/LaunchAgents/com.rook.sync.plist
+#      bash install_mac_sync.sh    # installs the plist AND this script
+#
+# ⚠️  THIS SCRIPT IS A DEPLOYED ARTIFACT, like the Pi-side code.
+#   A launchd job cannot READ from ~/Library/CloudStorage/Dropbox at all —
+#   /bin/bash gets "Operation not permitted" trying to execute or copy from
+#   there, even though the same job can WRITE into Dropbox (verified
+#   2026-08-18). So the scheduled sync runs a copy at ~/bin/rook_sync.sh, and
+#   editing this file does NOT change what the schedule runs. Re-run
+#   install_mac_sync.sh after every change.
+#
+#   That is not hypothetical: the installed copy froze at May 2026, so
+#   classified/ syncing — added here in August — never ran on a schedule and
+#   1,151 hard-positive frames sat on the Pi from 2026-07-04 to 2026-08-18.
+#   The run header below prints the installed copy's mtime for exactly this
+#   reason; if it looks old in /tmp/rook_sync.log, the schedule is stale.
 #
 # Manual run:
 #   bash ~/Library/CloudStorage/Dropbox/Rook/rook-sensor/app/sync_archive.sh
@@ -37,8 +49,11 @@ DROPBOX_ARCHIVE="$HOME/Library/CloudStorage/Dropbox/Rook/archive"
 
 SSH_OPTS="-o StrictHostKeyChecking=no -o ConnectTimeout=10 -o BatchMode=yes"
 
+SELF_MTIME=$(date -r "${BASH_SOURCE[0]}" '+%Y-%m-%d %H:%M' 2>/dev/null || echo "unknown")
+
 echo "========================================"
 echo "[$(date)] Starting Rook archive sync..."
+echo "   running: ${BASH_SOURCE[0]} (installed $SELF_MTIME)"
 echo "========================================"
 
 # ── Ensure directories ─────────────────────────────────────────
@@ -141,4 +156,23 @@ for dir in "$STAGING_DIR/beast_cam"/20*/; do
 done
 
 echo "✅ Staging → Dropbox copy complete."
+
+# ── Status breadcrumb ──────────────────────────────────────────
+# The scheduled job can WRITE into Dropbox but cannot READ or stat anything
+# there, so counts come from the staging dir — never point find/ls at
+# $DROPBOX_ARCHIVE, it fails with "Operation not permitted" under launchd.
+# This file is the only way to tell, from the workspace alone, whether the
+# schedule is alive and which installed copy of the script ran.
+STAGED_UNCLASSIFIED=$(find "$STAGING_DIR/unclassified" -maxdepth 1 -name '*.jpg' 2>/dev/null | wc -l | tr -d ' ')
+STAGED_CLASSIFIED=$(find "$STAGING_DIR/classified" -maxdepth 1 -name '*.jpg' 2>/dev/null | wc -l | tr -d ' ')
+cat > "$DROPBOX_ARCHIVE/.sync_status.json" <<EOF || true
+{
+  "last_run": "$(date -u '+%Y-%m-%dT%H:%M:%SZ')",
+  "script": "${BASH_SOURCE[0]}",
+  "script_installed": "$SELF_MTIME",
+  "staged_unclassified_frames": $STAGED_UNCLASSIFIED,
+  "staged_classified_frames": $STAGED_CLASSIFIED
+}
+EOF
+
 echo "[$(date)] Sync complete."

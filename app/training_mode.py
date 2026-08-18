@@ -5,73 +5,66 @@ training_mode.py — Rook "Day of Testing" Mode
 A temporary override configuration for the Rook Engine to maximize
 data collection for model fine-tuning.
 
-This script patches rook_engine.py configuration dynamically and runs it.
+This script sets ROOK_* environment variables *before* importing rook_engine,
+then runs the unmodified engine. This works because `load_dotenv` (called at
+rook_engine import time) never overrides variables already present in
+os.environ — so these overrides win over whatever is in ~/rook-env/.env.
 
 Key Overrides:
 - Lower motion thresholds (catch distant movement)
 - Lower YOLO confidence (0.25 instead of 0.70)
-- Save EVERY frame with motion (no persistence gate)
+- Save nearly every frame with motion (rate limit + persistence gate dropped)
 - Disable Slack/Email alerts (prevent spam)
-- Save annotated + raw frames to a dedicated training directory
+- Archive raw frames to a dedicated training directory
 """
 
 import os
 import sys
-import time
 from pathlib import Path
 
 # Insert the app directory into path so we can import rook_engine
 app_dir = Path(__file__).parent
 sys.path.insert(0, str(app_dir))
 
-print("\n" + "="*50)
-print(" 🚀 Starting Rook in TRAINING MODE")
-print("    - Slack & Email alerts DISABLED")
-print("    - Motion thresholds LOWERED")
-print("    - YOLO confidence set to 0.25")
-print("    - Saving ALL motion frames")
-print("="*50 + "\n")
+# --- Set ROOK_* overrides before rook_engine (and its load_dotenv call) runs ---
+os.environ["ROOK_MOTION_THRESHOLD_PIXELS"] = "100"   # Was 200
+os.environ["ROOK_MOTION_BLOB_MIN_PIXELS"] = "15"     # Was 30
+os.environ["ROOK_YOLO_CONF"] = "0.25"                # Was 0.70
+os.environ["ROOK_ARCHIVE_RATE_LIMIT_SECONDS"] = "5"  # Was 600 — near every event captured
+os.environ["ROOK_ARCHIVE_PERSISTENCE_REQ"] = "1"     # Was 2 — no multi-pass persistence gate
+os.environ["ROOK_ARCHIVE_ROOT"] = os.path.expanduser("~/rook-training")
+os.environ["ROOK_ALERTS_ENABLED"] = "0"              # Suppress email/Slack/heartbeat/digest
 
-# --- Patching the environment ---
-# Disable Twilio and Email entirely for the run
+# send_test_email() is a one-shot diagnostic gated by TEST_EMAIL, not by
+# ROOK_ALERTS_ENABLED (see rook_engine.py). Force it off here so a stray
+# TEST_EMAIL=1 left in ~/rook-env/.env can't fire an email during a training run.
+os.environ["TEST_EMAIL"] = "0"
+
+# --- Disable Twilio/SMS entirely for the run (unrelated to rook_engine config) ---
 os.environ["TWILIO_ACCOUNT_SID"] = ""
 os.environ["TWILIO_AUTH_TOKEN"] = ""
 os.environ["TWILIO_FROM_NUMBER"] = ""
 os.environ["NOTIFY_TO_NUMBER"] = ""
-os.environ["SMTP_SERVER"] = ""
 
-# --- Patching the engine constants dynamically ---
-import rook_engine
+import rook_engine  # noqa: E402  (must import after env overrides are set)
 
-# Override the thresholds
-rook_engine.MOTION_THRESHOLD_PIXELS = 100   # Was 200
-rook_engine.MOTION_BLOB_MIN_PIXELS = 15     # Was 30
-rook_engine.ARCHIVE_RATE_LIMIT_SECONDS = 5  # Was 600
-rook_engine.ARCHIVE_PERSISTENCE_REQ = 1     # Was 2
 
-# We need to monkey-patch the confidence threshold which is hardcoded inside main()
-# and reroute the archive directory.
-original_main = rook_engine.main
+def _print_banner():
+    print("\n" + "=" * 50)
+    print(" 🚀 Starting Rook in TRAINING MODE")
+    print(f"    - Alerts enabled:        {rook_engine.ALERTS_ENABLED}")
+    print(f"    - Motion threshold:      {rook_engine.MOTION_THRESHOLD_PIXELS}px "
+          f"(blob min {rook_engine.MOTION_BLOB_MIN_PIXELS}px)")
+    print(f"    - YOLO confidence:       {rook_engine.YOLO_CONF}")
+    print(f"    - Archive rate limit:    {rook_engine.ARCHIVE_RATE_LIMIT_SECONDS}s")
+    print(f"    - Archive persistence:   {rook_engine.ARCHIVE_PERSISTENCE_REQ} pass(es)")
+    print(f"    - Archive root:          {rook_engine.ARCHIVE_ROOT}")
+    print("=" * 50 + "\n")
 
-def training_main():
-    # Setup training directory
-    training_dir = os.path.expanduser("~/rook-training/raw_frames")
-    os.makedirs(training_dir, exist_ok=True)
-    
-    # We will let the engine run, but we want to intercept the YOLO call
-    # The cleanest way without rewriting the entire main loop is to warn the user
-    # that they need to manually edit rook_engine.py for the conf=0.25 change.
-    
-    print("⚠️  To fully enable training mode, please ensure line 1274 in rook_engine.py")
-    print("   is set to: base_conf = 0.25")
-    print("   and change the archive directory around line 1338 to ~/rook-training")
-    print("\nStarting modified engine in 3 seconds...\n")
-    
-    time.sleep(3)
-    original_main()
 
 if __name__ == "__main__":
+    _print_banner()
     try:
-        training_main()
+        rook_engine.main()
     except KeyboardInterrupt:
         print("\n🛑 Exiting Training Mode...")

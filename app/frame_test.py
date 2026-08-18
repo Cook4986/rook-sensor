@@ -40,8 +40,10 @@ def is_daytime():
     now = datetime.datetime.now(datetime.timezone.utc)
     
     try:
-        sr = sun.get_sunrise_time()
-        ss = sun.get_sunset_time()
+        # `at_date` passed explicitly — suntime's default is evaluated at import
+        # (see rook_engine.is_daytime), which strands long-lived callers on a stale date.
+        sr = sun.get_sunrise_time(now.date())
+        ss = sun.get_sunset_time(now.date())
         
         # FIX: suntime bug where sunset can return a time from yesterday
         # due to timezone offset crossings. If sunset is before sunrise, push it ahead 1 day.

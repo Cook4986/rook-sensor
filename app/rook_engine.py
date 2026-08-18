@@ -19,9 +19,69 @@ from rook_weather import RookEnrichment
 # Load Environment Variables
 load_dotenv(os.path.expanduser("~/rook-env/.env"))
 
+
+# ── Env-reading helpers ─────────────────────────────────────────────────────
+# Tolerant by design: a malformed value in ~/rook-env/.env (typo, empty string,
+# stray whitespace) must fall back to the default rather than crashing the
+# engine at import time on the Pi.
+#
+# These run BEFORE logging is configured below, so complaints are buffered here
+# rather than logged directly. Calling logging.warning() this early would make
+# the stdlib attach its own root handler, which turns the real basicConfig()
+# call into a no-op and silently costs us ~/rook.log for the whole run — a typo
+# in one env var must not disable logging.
+_ENV_WARNINGS: list = []
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return int(raw.strip())
+    except ValueError:
+        _ENV_WARNINGS.append(f"⚠️  Invalid int for {name}={raw!r}, using default {default}.")
+        return default
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return float(raw.strip())
+    except ValueError:
+        _ENV_WARNINGS.append(f"⚠️  Invalid float for {name}={raw!r}, using default {default}.")
+        return default
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    val = raw.strip().lower()
+    if val in ("1", "true", "yes", "on"):
+        return True
+    if val in ("0", "false", "no", "off"):
+        return False
+    _ENV_WARNINGS.append(f"⚠️  Invalid bool for {name}={raw!r}, using default {default}.")
+    return default
+
+
+def _env_path(name: str, default: str) -> str:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return os.path.expanduser(default)
+    try:
+        return os.path.expanduser(raw.strip())
+    except Exception:
+        _ENV_WARNINGS.append(f"⚠️  Invalid path for {name}={raw!r}, using default {default}.")
+        return os.path.expanduser(default)
+
+
 # ── Constants & Tunables ───────────────────────────────────────────────────────
-MOTION_THRESHOLD_PIXELS = 200   # ~50-100px changed for a 30px far subject; 200 passes anything YOLO can detect
-MOTION_BLOB_MIN_PIXELS = 30     # Min contiguous blob after dilation — lowered from 80 to catch distant park subjects (~5x6px blobs at 640x360)
+MOTION_THRESHOLD_PIXELS = _env_int("ROOK_MOTION_THRESHOLD_PIXELS", 200)   # ~50-100px changed for a 30px far subject; 200 passes anything YOLO can detect
+MOTION_BLOB_MIN_PIXELS = _env_int("ROOK_MOTION_BLOB_MIN_PIXELS", 30)     # Min contiguous blob after dilation — lowered from 80 to catch distant park subjects (~5x6px blobs at 640x360)
 COOLDOWN_SECONDS = 60           # Minimum seconds between ALERTS (not between inference)
 QUIET_HOURS_START = 23          # 11 PM
 QUIET_HOURS_END = 6             # 6 AM
@@ -30,15 +90,48 @@ MIN_SLACK_SCORE = 30            # Score threshold for Slack — aligned with hig
 THERMAL_CHECK_INTERVAL = 30     # Seconds between SoC temp reads (not per-frame)
 THERMAL_SOFT_LIMIT = 65.0       # °C: skip 2/3 frames to reduce CPU load
 THERMAL_WARN_LIMIT = 72.0       # °C: skip 5/6 frames — aggressive cooldown before hard 80°C shutdown
-ARCHIVE_RATE_LIMIT_SECONDS = 600  # Minimum seconds between unclassified frame saves — 10 min (was 5); reduces clockwork ambient captures
-ARCHIVE_MIN_BLOB_PIXELS    = 800  # Cohesive blob must be ≥ this area (px²) — raised from 500 to reject marginal foliage blobs
-ARCHIVE_MIN_CONCENTRATION  = 0.40 # largest_blob / motion_pixels ratio — tightened from 0.35; wind is diffuse (~0.1–0.2), real subjects ≥0.40
-ARCHIVE_PERSISTENCE_REQ    = 2    # Must trigger on N consecutive qualifying YOLO passes before archiving — filters one-off wind gusts
-CLASSIFIED_RATE_LIMIT_SECONDS = 600  # Min seconds between classified-detection frame saves — samples confirmed detections for training (docs/llm_autolabel_pipeline.md)
+ARCHIVE_RATE_LIMIT_SECONDS = _env_int("ROOK_ARCHIVE_RATE_LIMIT_SECONDS", 600)  # Minimum seconds between unclassified frame saves — 10 min (was 5); reduces clockwork ambient captures
+ARCHIVE_MIN_BLOB_PIXELS    = _env_int("ROOK_ARCHIVE_MIN_BLOB_PIXELS", 800)  # Cohesive blob must be ≥ this area (px²) — raised from 500 to reject marginal foliage blobs
+ARCHIVE_MIN_CONCENTRATION  = _env_float("ROOK_ARCHIVE_MIN_CONCENTRATION", 0.40) # largest_blob / motion_pixels — NOT a true 0–1 ratio, see ARCHIVE_MIN_COHESION below
+ARCHIVE_PERSISTENCE_REQ    = _env_int("ROOK_ARCHIVE_PERSISTENCE_REQ", 2)    # Must trigger on N consecutive qualifying YOLO passes before archiving — filters one-off wind gusts
+CLASSIFIED_RATE_LIMIT_SECONDS = _env_int("ROOK_CLASSIFIED_RATE_LIMIT_SECONDS", 600)  # Min seconds between classified-detection frame saves — samples confirmed detections for training (docs/llm_autolabel_pipeline.md)
 DIGEST_HOUR = 3                 # 3 AM — mathematically least-active hour, minimizes missed captures
 HEARTBEAT_INTERVAL = 6 * 3600  # Slack heartbeat every 6 hours (confirms system alive)
 LOG_FILE = os.path.expanduser("~/rook.log")
-BEAST_CAM_DIR = os.path.expanduser("~/beast_cam")  # Wildlife crop cache
+BEAST_CAM_DIR = _env_path("ROOK_BEAST_CAM_DIR", "~/beast_cam")  # Wildlife crop cache
+
+# YOLO confidence threshold: 0.70 across all hours to minimize false positives.
+# Previous adaptive scheme (0.30 quiet / 0.45 day) generated excessive noise.
+YOLO_CONF = _env_float("ROOK_YOLO_CONF", 0.70)
+
+# Archive root — unclassified and classified frame archives are derived from this.
+ARCHIVE_ROOT = _env_path("ROOK_ARCHIVE_ROOT", "~/rook-archive")
+ARCHIVE_UNCLASSIFIED_DIR = os.path.join(ARCHIVE_ROOT, "unclassified")
+ARCHIVE_CLASSIFIED_DIR   = os.path.join(ARCHIVE_ROOT, "classified")
+
+# Minimum Laplacian-variance "visual interest" for an unclassified frame to be
+# worth archiving — filters flat/blurry motion (fog, near-uniform surfaces).
+ARCHIVE_MIN_VISUAL_INTEREST = _env_float("ROOK_ARCHIVE_MIN_VISUAL_INTEREST", 250)
+
+# Cohesion gate — the measure ARCHIVE_MIN_CONCENTRATION was meant to be.
+#
+# ARCHIVE_MIN_CONCENTRATION divides a DILATED, hole-filling contourArea by a RAW
+# ON-pixel count, so the two terms aren't comparable and the quotient isn't bounded
+# by 1. Once motion is dense enough that dilation bridges neighbouring speckle, the
+# whole patch merges into one contour whose area includes every gap inside it, so
+# the score climbs with wind strength: measured on synthetic masks, diffuse foliage
+# motion scores 0.49–5.09 while a solid compact subject scores 1.18. Live Pi data
+# agrees — 34 consecutive archived frames ran 0.73–5.63, median 2.03, none below
+# the 0.40 threshold. That gate is not filtering what its name implies.
+#
+# Cohesion measures both terms on the raw mask, so it is bounded (0, 1]: 1.00 for a
+# solid subject, 0.01 for diffuse scatter. Default 0.0 = OFF; the 0.40 figure was
+# calibrated against the broken measure and must not be transplanted. Awaiting a
+# day of live distribution data before enabling via ROOK_ARCHIVE_MIN_COHESION.
+ARCHIVE_MIN_COHESION = _env_float("ROOK_ARCHIVE_MIN_COHESION", 0.0)
+
+# Master alert switch — when False, email/Slack/heartbeat/digest all no-op.
+ALERTS_ENABLED = _env_bool("ROOK_ALERTS_ENABLED", True)
 
 # Pre-compute MOG2 dilation kernel once at module load (avoid per-frame allocation)
 _MOG2_KERNEL = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
@@ -54,6 +147,10 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
+
+# Flush anything the env helpers complained about, now that ~/rook.log exists.
+for _env_warning in _ENV_WARNINGS:
+    logging.warning(_env_warning)
 
 # ── COCO Class → Emoji ────────────────────────────────────────────────────────
 EMOJI_MAP = {
@@ -655,8 +752,12 @@ _sun = Sun(_lat, _lon)
 def is_daytime():
     now = datetime.now(timezone.utc)
     try:
-        sr = _sun.get_sunrise_time()
-        ss = _sun.get_sunset_time()
+        # `at_date` MUST be passed explicitly: suntime 1.3.2 declares it as
+        # `at_date=datetime.now()`, a default evaluated once at import, so a
+        # long-running process silently computes sunrise/sunset for the day it
+        # started — permanently reporting night from its second day of uptime.
+        sr = _sun.get_sunrise_time(now.date())
+        ss = _sun.get_sunset_time(now.date())
         # FIX: suntime library bug — get_sunset_time() can return yesterday's date
         # due to UTC offset crossings. If sunset < sunrise, push it forward 1 day.
         import datetime as _dt
@@ -874,6 +975,9 @@ def send_daily_digest(notify_email, best_image_data, daily_stats, beast_cam_toda
     Includes yesterday's counts, cumulative stats (week/month/all-time from rook-stats.json),
     top event image, and Beast Cam wildlife crops. No raw timeline.
     """
+    if not ALERTS_ENABLED:
+        logging.debug("🔕 Alerts disabled (ROOK_ALERTS_ENABLED=0) — suppressing daily digest.")
+        return
     try:
         smtp_server = os.environ.get("SMTP_SERVER")
         smtp_port = int(os.environ.get("SMTP_PORT", 587))
@@ -1082,6 +1186,9 @@ def send_test_email(cam):
 
 # ── Real-Time Alert Dispatch ──────────────────────────────────────────────────
 def send_email_alert(emoji_summary, image_path):
+    if not ALERTS_ENABLED:
+        logging.debug("🔕 Alerts disabled (ROOK_ALERTS_ENABLED=0) — suppressing email alert.")
+        return
     try:
         smtp_server = os.environ.get("SMTP_SERVER")
         smtp_port = int(os.environ.get("SMTP_PORT", 587))
@@ -1118,6 +1225,9 @@ def send_email_alert(emoji_summary, image_path):
 
 
 def send_slack_alert(emoji_summary):
+    if not ALERTS_ENABLED:
+        logging.debug("🔕 Alerts disabled (ROOK_ALERTS_ENABLED=0) — suppressing Slack alert.")
+        return
     webhook_url = os.environ.get("SLACK_WEBHOOK_URL")
     if not webhook_url:
         return
@@ -1130,6 +1240,9 @@ def send_slack_alert(emoji_summary):
 
 def send_heartbeat():
     """Periodic Slack ping confirming the engine is alive. Fires every HEARTBEAT_INTERVAL seconds."""
+    if not ALERTS_ENABLED:
+        logging.debug("🔕 Alerts disabled (ROOK_ALERTS_ENABLED=0) — suppressing heartbeat.")
+        return
     webhook_url = os.environ.get("SLACK_WEBHOOK_URL")
     if not webhook_url:
         return
@@ -1375,13 +1488,20 @@ def main():
             motion_pixels = cv2.countNonZero(fgmask)
 
             # Two-stage gate: cheap pixel count first, expensive blob analysis only if needed.
-            # Dilation merges nearby pixels so small animals form one measurable blob.
-            # Wind scatter stays diffuse and fails the blob floor even after dilation.
+            # Dilation merges nearby pixels so small animals form one measurable blob —
+            # but it merges dense wind scatter just as readily, which is why the blob
+            # floor alone does not reject foliage (see ARCHIVE_MIN_COHESION).
             largest_blob = 0
+            largest_component_px = 0
             if motion_pixels > MOTION_THRESHOLD_PIXELS:
                 fgmask_dilated = cv2.dilate(fgmask, _MOG2_KERNEL, iterations=1)
                 _contours, _ = cv2.findContours(fgmask_dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
                 largest_blob = max((cv2.contourArea(c) for c in _contours), default=0)
+                # Same question asked on the RAW mask: how many of the moving pixels
+                # belong to one connected thing? Actual ON-pixel counts on both sides,
+                # so this is directly comparable to motion_pixels.
+                _ncc, _labels, _cc_stats, _ = cv2.connectedComponentsWithStats(fgmask, connectivity=8)
+                largest_component_px = max((_cc_stats[i, cv2.CC_STAT_AREA] for i in range(1, _ncc)), default=0)
 
             # ── MOG2 warmup guard ──────────────────────────────────────────
             # First 30 frames: MOG2 has no background model, everything looks like motion.
@@ -1469,12 +1589,9 @@ def main():
                 if forced_yolo:
                     last_forced_yolo = now_mono
                     logging.debug("   🔎 Forced YOLO scan (lingerer check).")
-                # Confidence threshold: 0.70 across all hours to minimize false positives.
-                # Previous adaptive scheme (0.30 quiet / 0.45 day) generated excessive noise.
-                base_conf = 0.70
                 frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                # Run YOLO at 0.70 baseline — only high-confidence detections pass through
-                results = model(frame_rgb, imgsz=1088, conf=base_conf, verbose=False)
+                # Run YOLO at the configured baseline — only high-confidence detections pass through
+                results = model(frame_rgb, imgsz=1088, conf=YOLO_CONF, verbose=False)
 
                 # Dynamic Confidence Interval: Airborne objects require higher certainty
                 AIRBORNE_CLASSES = {"bird", "airplane", "kite"}
@@ -1511,17 +1628,22 @@ def main():
                     now_mono_arc = time.time()
                     last_archive_save = getattr(main, '_last_archive_save', 0)
                     concentration = largest_blob / max(motion_pixels, 1)
-                    # Spatial heuristics: blob size, concentration, visual interest
+                    cohesion = largest_component_px / max(motion_pixels, 1)
+                    # Spatial heuristics: blob size, concentration, cohesion, visual interest.
+                    # Cohesion is logged unconditionally but only gates when its threshold
+                    # is set above 0.0 — it is being calibrated against live data.
                     qualifies = (largest_blob >= ARCHIVE_MIN_BLOB_PIXELS
-                                 and concentration >= ARCHIVE_MIN_CONCENTRATION)
+                                 and concentration >= ARCHIVE_MIN_CONCENTRATION
+                                 and cohesion >= ARCHIVE_MIN_COHESION)
                     if qualifies:
                         gray = cv2.cvtColor(small_frame, cv2.COLOR_BGR2GRAY)
                         visual_interest = cv2.Laplacian(gray, cv2.CV_64F).var()
-                        qualifies = visual_interest >= 250
+                        qualifies = visual_interest >= ARCHIVE_MIN_VISUAL_INTEREST
                     if qualifies:
                         archive_persistence_count += 1
                         logging.debug(f"   Unclassified motion qualifies (blob={largest_blob:.0f}px², "
-                                      f"conc={concentration:.2f}, persist={archive_persistence_count}/"
+                                      f"conc={concentration:.2f}, cohesion={cohesion:.2f}, "
+                                      f"persist={archive_persistence_count}/"
                                       f"{ARCHIVE_PERSISTENCE_REQ}).")
                     else:
                         # Failed spatial gates — reset persistence (not a real subject)
@@ -1534,8 +1656,9 @@ def main():
                             and now_mono_arc - last_archive_save >= ARCHIVE_RATE_LIMIT_SECONDS):
                         logging.info(f"   📸 Persistent unclassified motion archived "
                                      f"(blob={largest_blob:.0f}px², conc={concentration:.2f}, "
+                                     f"cohesion={cohesion:.2f}, "
                                      f"persist={archive_persistence_count}).")
-                        archive_dir = os.path.expanduser("~/rook-archive/unclassified")
+                        archive_dir = ARCHIVE_UNCLASSIFIED_DIR
                         os.makedirs(archive_dir, exist_ok=True)
                         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
                         small_save = cv2.resize(frame, (640, 360))
@@ -1586,7 +1709,7 @@ def main():
                     now_cls = time.time()
                     if now_cls - getattr(main, '_last_classified_save', 0) >= CLASSIFIED_RATE_LIMIT_SECONDS:
                         try:
-                            cls_dir = os.path.expanduser("~/rook-archive/classified")
+                            cls_dir = ARCHIVE_CLASSIFIED_DIR
                             os.makedirs(cls_dir, exist_ok=True)
                             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
                             # Raw frame, NOT the annotated plot — drawn boxes would poison training
