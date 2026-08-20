@@ -56,17 +56,22 @@ workspace `Media/` as `before_tuning.jpg`/`after_tuning.jpg`) the MCU fallback p
 acceptable bright-daylight color.
 
 We installed the community-standard file anyway, because a file on disk is inspectable
-and editable where MCU-internal tuning is not:
+and editable where MCU-internal tuning is not. We initially used `imx290.json` since
+IMX462 is nominally the IMX290 sensor family, but that file only ships basic greyworld
+AWB and one fixed CCM — it produced a persistent magenta/pink cast at all times of day,
+not just dawn/dusk (see `DECISIONS.md` D14). **Updated 2026-08-18:** switched to the
+sensor-specific `imx462.json`, which the Pi already had on disk unused — it has full
+Bayesian AWB and multiple CCMs across color temperatures, and visibly fixed the cast:
 
 ```bash
-sudo cp /usr/share/libcamera/ipa/rpi/pisp/imx290.json \
+sudo cp /usr/share/libcamera/ipa/rpi/pisp/imx462.json \
         /usr/share/libcamera/ipa/rpi/pisp/arducam-pivariety.json
 ```
 
-(IMX462 is the IMX290 sensor family.) If a color cast reappears — most likely at
-dawn/dusk — edit that file: `rpi.awb` (try `"bayes": 0` for greyworld mode) and
-`rpi.alsc` (lens shading; can be disabled by renaming to `disable.rpi.alsc`) are the
-levers. Delete the file to revert to MCU fallback.
+If a color cast reappears, edit that file directly: `rpi.awb` and `rpi.alsc` (lens
+shading; can be disabled by renaming to `disable.rpi.alsc`) are the levers. Delete the
+file to revert to MCU fallback, or `cp imx290.json arducam-pivariety.json` to go back to
+the old (worse) tuning.
 
 Facts ruled in/out (2026-08-16): the B0444 has an **integral IR-cut filter** (visible
 light only, per Arducam spec), so raw IR contamination is unlikely — though the 141°

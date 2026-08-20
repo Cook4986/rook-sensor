@@ -36,6 +36,25 @@ Cost control: every VLM verdict is cached by crop content hash in
 autolabel_cache.jsonl — a crop is billed at most once, ever. Re-runs are
 incremental and idempotent.
 
+Spend priority order (added 2026-08-18): under --max-crops/--max-usd, frames
+are processed beast_cam/ -> classified/ -> reclassified/ -> unclassified/ ->
+processed/, NOT alphabetically and NOT by folder size. The first three are
+guaranteed real content (a detection already exists); unclassified/ is the
+zero-detection recall net (lower hit rate but the only source for subjects
+too small to box); processed/ is verified-empty negatives we already hold
+60x the needed count of, so it's funded last — a tight budget should be
+spent on real content before re-confirming frames we know are empty.
+
+Spend ledger (added 2026-08-18): --max-usd is enforced against a PERSISTENT
+cross-process total in autolabel/spend_ledger.jsonl, not this run's own
+in-memory counter. This closed a real gap — an orphaned/duplicate process
+(or a kill that didn't reach a child) kept billing while a fresh run's own
+zero-based counter had no way to see that spend, so two runs could each
+individually respect a $50 cap while jointly blowing past it. Every
+billable call appends its incremental cost immediately; the ledger is
+append-only and summed at startup, same durability pattern as
+autolabel_cache.jsonl.
+
 Usage:
     python3 llm_autolabel.py                  # label everything new
     python3 llm_autolabel.py --dry-run        # report without writing dataset
@@ -96,6 +115,13 @@ PROCESSED_DIR    = ARCHIVE_DIR / "processed"      # hard negatives (verified emp
 BEAST_CAM_DIR    = ARCHIVE_DIR / "beast_cam"      # wildlife crops (date subdirs)
 DATASET_DIR      = ARCHIVE_DIR / "autolabel"      # output YOLO dataset
 CACHE_FILE       = DATASET_DIR / "autolabel_cache.jsonl"
+# Persistent, cross-process spend ledger (added 2026-08-18, D-pending). A
+# single run's --max-usd only sees its OWN in-memory cost_so_far, which is
+# blind to spend from any other run — a crashed/orphaned process, a botched
+# kill that leaves a child alive, or a duplicate launch. This file is the
+# durable source of truth for "how much has this API key actually spent,
+# ever" so --max-usd is a real hard ceiling across restarts, not per-run.
+SPEND_LEDGER_FILE = DATASET_DIR / "spend_ledger.jsonl"
 
 LLM_API_BASE = os.environ.get("LLM_API_BASE", "https://api.openai.com/v1")
 LLM_API_KEY  = os.environ.get("LLM_API_KEY", "")
@@ -407,6 +433,34 @@ def append_cache(record: dict):
         f.write(json.dumps(record) + "\n")
 
 
+def load_ledger_total() -> float:
+    """Sum of every recorded spend increment, ever, across all runs and
+    processes. Append-only, same durability pattern as the label cache —
+    a crash mid-write loses at most one partial line, never prior totals."""
+    total = 0.0
+    if SPEND_LEDGER_FILE.exists():
+        with open(SPEND_LEDGER_FILE) as f:
+            for line in f:
+                try:
+                    total += json.loads(line)["delta_usd"]
+                except (json.JSONDecodeError, KeyError, TypeError):
+                    continue
+    return total
+
+
+def append_ledger(delta_usd: float, note: str = ""):
+    """Record one incremental spend event immediately — called right after
+    each billable call, not batched, so a killed/orphaned process's spend is
+    visible to every other process's next ledger read, not just its own
+    in-memory counter."""
+    if delta_usd <= 0:
+        return
+    SPEND_LEDGER_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with open(SPEND_LEDGER_FILE, "a") as f:
+        f.write(json.dumps({"ts": datetime.now().isoformat(timespec="seconds"),
+                             "delta_usd": round(delta_usd, 6), "note": note}) + "\n")
+
+
 # ── Dataset assembly ──────────────────────────────────────────────────────────
 def split_of(img_path: Path) -> str:
     """Deterministic train/val assignment — stable as the archive grows."""
@@ -453,10 +507,12 @@ def main():
     parser.add_argument("--max-crops", type=int, default=1000,
                         help="max NEW crops sent to the LLM this run (cost budget)")
     parser.add_argument("--max-usd", type=float, default=None,
-                        help="stop new LLM calls once estimated spend hits this many "
-                             "dollars (requires LLM_PRICE_INPUT_PER_1M/"
-                             "LLM_PRICE_OUTPUT_PER_1M to be set — otherwise a warning "
-                             "is printed and the cap is NOT enforced)")
+                        help="stop new LLM calls once TOTAL estimated spend — this run "
+                             "PLUS every prior run's recorded spend in "
+                             "autolabel/spend_ledger.jsonl — hits this many dollars "
+                             "(requires LLM_PRICE_INPUT_PER_1M/LLM_PRICE_OUTPUT_PER_1M "
+                             "to be set — otherwise a warning is printed and the cap "
+                             "is NOT enforced)")
     parser.add_argument("--max-negatives", type=int, default=300,
                         help="max background negatives from processed/")
     parser.add_argument("--dry-run", action="store_true",
@@ -493,29 +549,50 @@ def main():
     name_to_id = {v: k for k, v in coco_names.items()}
     custom_id = {name: 80 + i for i, name in enumerate(CUSTOM_CLASSES)}
 
-    # Sources:
-    #   unclassified/  ghost motion — subjects the Pi missed (recall examples)
+    # Sources, in SPEND PRIORITY ORDER (matters under --max-usd/--max-crops —
+    # once a cap hits, everything after it in this list gets skipped, so
+    # guaranteed-content folders must come before speculative ones):
+    #   beast_cam/     wildlife crops — ideal Stage B1 species inputs; smallest
+    #                  folder, directly targets the weakest class category
     #   classified/    Pi-confirmed detections at conf 0.70 — hard positives that
     #                  REFINE existing classes, plus confirmed truck/bird parents
     #                  to mine vendor/species subclasses from (.json sidecars
     #                  carry the Pi's verdict for agreement auditing)
-    #   reclassified/  Mac-teacher finds the Pi missed
-    #   beast_cam/     wildlife crops — ideal Stage B1 species inputs
-    #   processed/     teacher-empty frames — still screened by Stage B2 for
-    #                  subjects the detector can't propose (small wildlife,
-    #                  smoke/flood/downed_tree); frames that stay empty remain
-    #                  the background-negatives pool
-    frames = sorted(set(UNCLASSIFIED_DIR.glob("*.jpg"))
-                    | set(CLASSIFIED_DIR.glob("*.jpg"))
-                    | set(RECLASSIFIED_DIR.glob("*.jpg"))
-                    | set(BEAST_CAM_DIR.glob("*/*.jpg"))
-                    | set(PROCESSED_DIR.glob("*.jpg")))
+    #   reclassified/  Mac-teacher finds the Pi missed — also guaranteed real
+    #                  content (a box already exists)
+    #   unclassified/  ghost motion — subjects the Pi missed (recall examples).
+    #                  Zero-detection by definition, so Stage B2 only; the sole
+    #                  source for wildlife/scene subjects too small to box, but
+    #                  historically <1% non-"none" verdicts (D2/D13 quality bugs)
+    #   processed/     teacher-empty frames already verified empty — screened by
+    #                  Stage B2 for the same recall reasons as unclassified/, but
+    #                  LAST: we already carry 18k+ negatives against a ~300
+    #                  target, so re-screening them is the lowest-value spend in
+    #                  the archive. Frames that stay empty remain the
+    #                  background-negatives pool regardless of scan order.
+    def _priority_frames():
+        seen = set()
+        ordered = []
+        for d, pattern in ((BEAST_CAM_DIR, "*/*.jpg"), (CLASSIFIED_DIR, "*.jpg"),
+                           (RECLASSIFIED_DIR, "*.jpg"), (UNCLASSIFIED_DIR, "*.jpg"),
+                           (PROCESSED_DIR, "*.jpg")):
+            for p in sorted(d.glob(pattern)):
+                if p not in seen:
+                    seen.add(p)
+                    ordered.append(p)
+        return ordered
+    frames = _priority_frames()
     if not frames:
         print("   No archive frames to process.")
         return
 
     cache = load_cache()
     client = httpx.Client(headers={"Authorization": f"Bearer {LLM_API_KEY}"})
+
+    prior_spend = load_ledger_total() if usd_priced else 0.0
+    if usd_enforced and prior_spend > 0:
+        print(f"   💳 Spend ledger: ${prior_spend:.4f} already spent across prior/other "
+              f"runs — --max-usd {args.max_usd:.4f} is a TOTAL ceiling, not per-run.")
 
     llm_calls = 0
     tokens_in = 0
@@ -533,9 +610,10 @@ def main():
                 print(f"   💰 --max-crops {args.max_crops} reached — no further LLM calls this run.")
                 budget_msg_printed = True
             return False
-        if usd_enforced and cost_so_far >= args.max_usd:
+        if usd_enforced and (prior_spend + cost_so_far) >= args.max_usd:
             if not budget_msg_printed:
-                print(f"   💰 --max-usd {args.max_usd:.4f} reached (est. ${cost_so_far:.4f}) — "
+                print(f"   💰 --max-usd {args.max_usd:.4f} reached (this run: ${cost_so_far:.4f} + "
+                      f"prior: ${prior_spend:.4f} = ${prior_spend + cost_so_far:.4f}) — "
                       f"no further LLM calls this run.")
                 budget_msg_printed = True
             return False
@@ -545,7 +623,16 @@ def main():
 
     skipped_unreadable = 0
     labeled_names = set()
-    for img_path in frames:
+    progress_start = time.monotonic()
+    for idx, img_path in enumerate(frames):
+        if (idx + 1) % 500 == 0:
+            elapsed = time.monotonic() - progress_start
+            rate = (idx + 1) / elapsed if elapsed > 0 else 0
+            eta_s = (len(frames) - (idx + 1)) / rate if rate > 0 else 0
+            cost_str = (f"${cost_so_far:.4f} this run (${prior_spend + cost_so_far:.4f} total)"
+                        if usd_priced else "unpriced")
+            print(f"   … {idx + 1}/{len(frames)} frames ({rate:.1f}/s, "
+                  f"ETA {eta_s/60:.0f}m) — {llm_calls} LLM calls, {cost_str}", flush=True)
         # Dropbox sync can leave zero-byte/partial JPEGs — skip, don't crash
         frame = cv2.imread(str(img_path))
         if frame is None or frame.size == 0:
@@ -587,8 +674,11 @@ def main():
                         llm_calls += 1
                         tokens_in += usage["prompt_tokens"]
                         tokens_out += usage["completion_tokens"]
-                        cost_so_far += (usage["prompt_tokens"] / 1e6) * LLM_PRICE_INPUT_PER_1M \
-                                     + (usage["completion_tokens"] / 1e6) * LLM_PRICE_OUTPUT_PER_1M
+                        call_cost = (usage["prompt_tokens"] / 1e6) * LLM_PRICE_INPUT_PER_1M \
+                                  + (usage["completion_tokens"] / 1e6) * LLM_PRICE_OUTPUT_PER_1M
+                        cost_so_far += call_cost
+                        if usd_priced:
+                            append_ledger(call_cost, note=f"B1 {cls_name}")
                         if verdict is None:
                             stats["llm_failures"] += 1
                         else:
@@ -633,8 +723,11 @@ def main():
                     llm_calls += 1
                     tokens_in += usage["prompt_tokens"]
                     tokens_out += usage["completion_tokens"]
-                    cost_so_far += (usage["prompt_tokens"] / 1e6) * LLM_PRICE_INPUT_PER_1M \
-                                 + (usage["completion_tokens"] / 1e6) * LLM_PRICE_OUTPUT_PER_1M
+                    call_cost = (usage["prompt_tokens"] / 1e6) * LLM_PRICE_INPUT_PER_1M \
+                              + (usage["completion_tokens"] / 1e6) * LLM_PRICE_OUTPUT_PER_1M
+                    cost_so_far += call_cost
+                    if usd_priced:
+                        append_ledger(call_cost, note="B2 frame")
                     if verdict is None:
                         stats["llm_failures"] += 1
                     else:
@@ -707,6 +800,8 @@ def main():
             "llm_calls": llm_calls, "cache_hits": stats["cache_hits"],
             "tokens_in": tokens_in, "tokens_out": tokens_out,
             "estimated_cost_usd": round(cost_so_far, 4) if usd_priced else None,
+            "prior_ledger_spend_usd": round(prior_spend, 4) if usd_priced else None,
+            "total_spend_to_date_usd": round(prior_spend + cost_so_far, 4) if usd_priced else None,
             "max_usd_cap": args.max_usd if usd_enforced else None,
         }
         with open(DATASET_DIR / "manifest.json", "w") as f:
@@ -732,7 +827,8 @@ def main():
     print(f"   Background negs   : {len(negatives)}")
     print(f"   LLM calls / cache : {llm_calls} / {stats['cache_hits']}")
     if tokens_in or tokens_out:
-        cost_str = f"est. ${cost_so_far:.4f}" if usd_priced else "cost unpriced (set LLM_PRICE_*_PER_1M)"
+        cost_str = (f"est. ${cost_so_far:.4f} this run, ${prior_spend + cost_so_far:.4f} total to date"
+                    if usd_priced else "cost unpriced (set LLM_PRICE_*_PER_1M)")
         print(f"   Tokens in / out   : {tokens_in} / {tokens_out} ({cost_str})")
     if stats["llm_failures"]:
         print(f"   LLM failures      : {stats['llm_failures']} (kept COCO labels)")
@@ -748,7 +844,7 @@ def main():
             combined[k] = combined.get(k, 0) + v
         summary = "  ".join(f"{k} ×{v}" for k, v in
                             sorted(combined.items(), key=lambda x: -x[1]))
-        cost_note = f", est. ${cost_so_far:.4f}" if usd_priced else ""
+        cost_note = f", est. ${cost_so_far:.4f} (${prior_spend + cost_so_far:.4f} total)" if usd_priced else ""
         send_slack(f"🏷️ *Rook Auto-Label* — {stats['frames']} frames → "
                    f"{stats['boxes']} boxes ({promoted_total} crop promotions, "
                    f"{scene_total} whole-frame finds)\n"
