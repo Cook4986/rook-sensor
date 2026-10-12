@@ -488,17 +488,16 @@ The base YOLO26n model covers 80 COCO classes. The teacher detector and VLM pipe
 propose site-specific boxes and labels across a 30-class appended vocabulary.
 **Every promoted custom box requires human review.** Confidence is not approval.
 
-The October 2026 audit found that review is not yet enforced by dataset assembly or
-trainer preflight and validation coverage is sparse. Paid-request locking and
-conservative reservations are now implemented; see [spend accounting](docs/spend_accounting.md)
-for required local-ledger initialization and verified pricing policy. Do not start
-another paid labeling or training run until
-[execution-plan milestone 2](docs/execution_plan.md) passes. `processed/` images
-must not become empty-label negatives solely because of their folder.
+The archive review now leads to a [source-bound box review and approved snapshot](docs/approved_training_data.md).
+The trainer rejects unreviewed/changed data, missing enabled-class coverage, cross-split
+visit groups and a missing stock baseline before training. Paid-request accounting uses
+[a locked local ledger and conservative reservations](docs/spend_accounting.md).
+Production activation still requires verified provider policy; the dataset still needs
+more reviewed independent examples. `processed/` is not proof of an empty frame.
 
 The existing scripts cover labeling (`llm_autolabel.py`), legacy gallery review
 (`review_custom_labels.py`), fine-tuning/export (`train_custom_model.py`) and
-versioned deployment (`deploy_model_to_pi.sh`). Their release checks still need
+versioned deployment (`deploy_model_to_pi.sh`). NCNN evaluation and Pi deployment checks still need
 strengthening; no custom model has shipped. Custom alert mappings remain inert
 until a validated model is deployed. Design and known gaps are in
 [the pipeline reference](docs/llm_autolabel_pipeline.md).

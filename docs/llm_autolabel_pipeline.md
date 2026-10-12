@@ -2,14 +2,13 @@
 
 This document supersedes the annotation step (§2) of [`rook_custom_model_proposal.md`](../rook_custom_model_proposal.md). It describes how Rook leverages the **unclassified image archive** to extend and refine the on-device YOLO model using **LLM-based online labeling** — machine-proposed boxes with mandatory human verification — and how the resulting detection update conforms to the notification/UI specs (`docs/emoji_vocabulary.md`, `docs/refinements.md` v2 dashboard, `PRIVACY.md`).
 
-> **October 12, 2026 implementation status:** this document mixes existing mechanisms
-> and intended safeguards. Human review is mandatory (D2), but legacy assembly/training
-> does not enforce it. Paid accounting now uses a locked local ledger and conservative
-> per-attempt reservations ([details](spend_accounting.md));
-> first-release baseline and missing-class coverage checks are incomplete. Follow
-> [execution-plan milestone 2](execution_plan.md) before further paid runs/training.
-> The local catalog/review browser makes proposals reviewable; its identity/triage
-> ledger does not approve bounding boxes for training.
+> **October 12, 2026 implementation status:** teacher/VLM outputs are proposals.
+> [Source-bound box review and approved snapshots](approved_training_data.md) now
+> enforce the human gate at training preflight, enabled-class coverage and a stock
+> baseline bound to the chosen snapshot. Legacy assembly does not confer approval.
+> [Paid accounting](spend_accounting.md) uses a locked local ledger and conservative
+> per-attempt reservations, pending verified production policy and initialization.
+> The first archive identity/triage ledger alone does not approve boxes for training.
 
 ---
 
@@ -109,7 +108,7 @@ Vision LLMs are unreliable at emitting pixel-accurate coordinates but excellent 
 | VLM hallucinates JSON | Strict schema parse; malformed responses are retried once, then dropped (falls back to COCO label) |
 | VLM boxes are imprecise (Stage B2) | Stricter 0.85 confidence gate; box geometry validated and clamped; minimum-area floor rejects boxes too small for a rough box to be useful training signal |
 | Teacher false positives become training data | Teacher conf 0.20 proposals are only *promoted* to custom labels by the VLM; un-refined proposals below 0.35 are discarded from the dataset |
-| Base-class forgetting | Dataset keeps all 80 COCO IDs, includes local COCO-labeled boxes and background negatives; release gate checks base-class mAP against the previous model |
+| Base-class forgetting | Dataset keeps all 80 COCO IDs, includes local COCO-labeled boxes and background negatives; release gate checks every generic validation class against a stock baseline bound to the same snapshot/checkpoint/resolution |
 | Cost runaway | Content-hash cache and append-only spend history reduce repeated work. The local paid-run lock and durable per-attempt reservations now guard the configured ceiling on one designated host. A verified model/endpoint policy and historical-ledger initialization are required; see [spend accounting](spend_accounting.md). |
 | Spend wasted on low-value re-screening | Priority order is `beast_cam/` → `classified/` → `reclassified/` → `unclassified/` → `processed/`. Detections remain proposals and processed frames are not verified empty. Mine the cache and review balanced samples before paying for more inference. |
 | Silent drift | `model_card.json` + Slack digest after every labeling/training run; dataset manifests are append-only and auditable |
@@ -186,30 +185,20 @@ LLM_REASONING_EFFORT=none          # reasoning models burn max_tokens on thinkin
                                    # these calls need a single JSON verdict, not thought
 ```
 
-### Typical cycle
+### Current cycle
 
-```bash
-# 1. Reuse cached verdicts (no paid VLM calls; teacher still runs)
-python3 app/llm_autolabel.py
-# Paid runs additionally require --allow-paid --spend-policy, a local ledger,
-# and the remaining execution-plan training/data prerequisites.
+1. Mine metadata/cached verdicts with `archive_catalog.py` and complete identity/triage
+   review through `archive_review.py`.
+2. Prepare local raw snapshots and teacher boxes with `box_review.py`; explicitly
+   review them through `archive_review.py --boxes`.
+3. Review independent visit groups and splits, export a new approved snapshot with
+   `approved_dataset.py`, then run trainer `--verify-only`.
+4. Once coverage passes, evaluate the local stock checkpoint with `--baseline-only`,
+   train against that bound baseline and require the release gate before NCNN export.
 
-# 2. Review every custom label by eye BEFORE training — mandatory since the
-#    Jul 2026 audit (B2 wildlife finds measured 1/30 precision unreviewed).
-#    Sort into review/rejected/ and review/approved/ in Finder, then apply.
-python3 app/review_custom_labels.py               # gallery of dataset boxes
-python3 app/review_custom_labels.py --candidates  # sub-gate verdicts worth rescuing
-python3 app/review_custom_labels.py --apply       # edit labels + pin the cache
-
-# 3. Re-run the labeler so approved candidates enter the dataset with
-#    proper teacher boxes (cache-only pass — no new LLM spend)
-python3 app/llm_autolabel.py
-
-# 4. Train + gate + export (refuses to export on regression)
-python3 app/train_custom_model.py
-
-# 5. Push to the Pi (auto-rollback on unhealthy restart)
-bash app/deploy_model_to_pi.sh
-```
+Detailed commands and evidence requirements: [approved training data](approved_training_data.md).
+`review_custom_labels.py` remains the legacy gallery/cache workflow; leaving a box in
+its old folder is not sufficient approval for the new trainer. Paid labeling is an
+explicit, separately gated action; do not run it by default as part of this cycle.
 
 The cache supports incremental runs and pins existing human decisions. Do not schedule paid archive-wide passes until the spend and training gates in the execution plan are enforced. Keep the append-only cache and review history intact.

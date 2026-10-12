@@ -75,16 +75,21 @@ def append_decision(path, item, decision, corrected_label=None):
     return record
 
 
-def make_server(catalog, archive, staging, port=0):
+def make_server(catalog, archive, staging, port=0, box_mode=False):
     catalog = require_local(catalog)
     roots = [Path(p).expanduser().resolve() for p in (archive, staging)]
-    items = load_items(catalog)
-    ledger = catalog / "review_decisions.jsonl"
+    if box_mode:
+        from box_review import CLASSES, append_box_decision, verified_image
+        items = {i['item_id']: i for i in json.loads((catalog/'box_batch.json').read_text())}
+        roots = [catalog]
+    else:
+        items = load_items(catalog)
+    ledger = catalog / ("box_decisions.jsonl" if box_mode else "review_decisions.jsonl")
     # Fail at startup on damaged history rather than hiding review work.
     read_decisions(ledger)
     token = secrets.token_urlsafe(32)
     lock = threading.Lock()
-    page = Path(__file__).with_name("archive_review.html").read_bytes()
+    page = Path(__file__).with_name("box_review.html" if box_mode else "archive_review.html").read_bytes()
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
@@ -128,12 +133,24 @@ def make_server(catalog, archive, staging, port=0):
             elif parsed.path == "/api/items":
                 with lock:
                     decisions = read_decisions(ledger)
+                if box_mode:
+                    decisions = {key: d for key, d in decisions.items() if key in items
+                                 and d.get('proposal_sha256') == items[key]['proposal_sha256']}
                 self.reply(200, json.dumps({"items": list(items.values()), "decisions": decisions,
-                                           "classes": [c for c in CUSTOM_CLASSES if c != "flood"]}).encode())
+                                           "classes": ([{'id': i, 'name': c} for i, c in enumerate(CLASSES) if c != 'flood']
+                                                       if box_mode else [c for c in CUSTOM_CLASSES if c != "flood"])}).encode())
             elif parsed.path == "/image":
                 item = items.get(query.get("item", [""])[0])
                 if not item:
                     self.reply(404); return
+                if box_mode:
+                    try:
+                        if not Path(item['source_paths'][0]).resolve().is_relative_to(catalog):
+                            raise ValueError('Source outside local package')
+                        self.reply(200, verified_image(item), 'image/jpeg')
+                    except (OSError, ValueError):
+                        self.reply(409, b'{"error":"Source changed or unavailable; regenerate review."}')
+                    return
                 paths = [item.get("gallery_path")] if query.get("view") == ["gallery"] else item.get("source_paths", [])
                 for value in paths:
                     if not value:
@@ -167,7 +184,8 @@ def make_server(catalog, archive, staging, port=0):
                 data = json.loads(self.rfile.read(length))
                 item = items[data["item_id"]]
                 with lock:
-                    record = append_decision(ledger, item, data["decision"], data.get("corrected_label"))
+                    record = (append_box_decision(ledger, item, data) if box_mode else
+                              append_decision(ledger, item, data["decision"], data.get("corrected_label")))
                 self.reply(200, json.dumps(record).encode())
             except (ValueError, KeyError, TypeError) as exc:
                 self.reply(400, json.dumps({"error": str(exc)}).encode())
@@ -184,8 +202,9 @@ def main():
     parser.add_argument("--archive", type=Path, default=Path.home() / "Library/CloudStorage/Dropbox/Rook/archive")
     parser.add_argument("--staging", type=Path, default=Path.home() / "rook-staging")
     parser.add_argument("--port", type=int, default=0)
+    parser.add_argument("--boxes", action="store_true", help="review prepared source-bound boxes")
     args = parser.parse_args()
-    server, url = make_server(args.catalog, args.archive, args.staging, args.port)
+    server, url = make_server(args.catalog, args.archive, args.staging, args.port, args.boxes)
     print(f"Private local review: {url}", flush=True)
     print("Human decisions stay local; no training or legacy-cache changes.", flush=True)
     try:
