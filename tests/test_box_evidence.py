@@ -83,6 +83,9 @@ class EvidenceTest(unittest.TestCase):
                     {'class_id':80,'xyxy':[.8,.1,.2,.5]}, {'class_id':80,'xyxy':[-.1,0,1,1]}):
             with self.assertRaises(ValueError):normalize_boxes([box])
         self.assertEqual(len(CLASSES),110)
+        self.assertEqual(CLASSES[9], 'traffic light')
+        self.assertEqual(CLASSES[32], 'sports ball')
+        self.assertEqual(CLASSES[80], 'trash_truck')
 
     def test_annotated_source_is_not_allowed(self):
         records=[json.loads(x) for x in (self.catalog/'review_decisions.jsonl').read_text().splitlines()]

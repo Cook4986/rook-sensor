@@ -30,6 +30,9 @@ COCO = ('person bicycle car motorcycle airplane bus train truck boat traffic_lig
         'potted_plant bed dining_table toilet tv laptop mouse remote keyboard cell_phone '
         'microwave oven toaster sink refrigerator book clock vase scissors teddy_bear '
         'hair_drier toothbrush').split()
+# Preserve stock display names exactly: the engine's generic-class mappings use
+# spaces ("traffic light"), while appended custom labels retain underscores.
+COCO = [name.replace('_', ' ') for name in COCO]
 CLASSES = COCO + CUSTOM_CLASSES
 
 
@@ -155,7 +158,7 @@ def teacher_boxes(item, teacher):
     for prediction in result.boxes:
         cls = int(prediction.cls[0])
         if not 0 <= cls < 80: raise ValueError('Teacher must use the stock COCO vocabulary')
-        if teacher.names[cls].replace(' ', '_') != COCO[cls]:
+        if teacher.names[cls] != COCO[cls]:
             raise ValueError('Teacher class mapping differs from the Rook contract')
         coords = [int(v) for v in prediction.xyxy[0].tolist()]
         x1, y1, x2, y2 = coords
