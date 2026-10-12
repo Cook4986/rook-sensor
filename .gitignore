@@ -34,3 +34,9 @@ Thumbs.db
 *.jpeg
 *.png
 !assets/*.png
+
+# Local event spool (metadata and private raw frames)
+*.sqlite3
+*.sqlite3-journal
+*.sqlite3-wal
+*.sqlite3-shm
