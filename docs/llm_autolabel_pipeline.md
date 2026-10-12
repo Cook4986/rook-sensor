@@ -1,6 +1,14 @@
-# LLM Auto-Label Pipeline — Extending YOLO with Local Imagery, Zero Manual Annotation
+# LLM Auto-Label Pipeline — Extending YOLO with Local Imagery, Human-Reviewed Proposals
 
-This document supersedes the annotation step (§2) of [`rook_custom_model_proposal.md`](../rook_custom_model_proposal.md). It describes how Rook leverages the **unclassified image archive** to extend and refine the on-device YOLO model using **LLM-based online labeling** — no Roboflow, no CVAT, no human-drawn boxes — and how the resulting detection update conforms to the notification/UI specs (`docs/emoji_vocabulary.md`, `docs/refinements.md` v2 dashboard, `PRIVACY.md`).
+This document supersedes the annotation step (§2) of [`rook_custom_model_proposal.md`](../rook_custom_model_proposal.md). It describes how Rook leverages the **unclassified image archive** to extend and refine the on-device YOLO model using **LLM-based online labeling** — machine-proposed boxes with mandatory human verification — and how the resulting detection update conforms to the notification/UI specs (`docs/emoji_vocabulary.md`, `docs/refinements.md` v2 dashboard, `PRIVACY.md`).
+
+> **October 12, 2026 implementation status:** this document mixes existing mechanisms
+> and intended safeguards. Human review is mandatory (D2), but legacy assembly/training
+> does not enforce it. The lifetime spend ledger lacks a process lock/reservations;
+> first-release baseline and missing-class coverage checks are incomplete. Follow
+> [execution-plan milestone 2](execution_plan.md) before further paid runs/training.
+> The local catalog/review browser makes proposals reviewable; its identity/triage
+> ledger does not approve bounding boxes for training.
 
 ---
 
@@ -13,10 +21,10 @@ Rook already produces a continuously-growing, pre-filtered corpus of **local ima
 | `archive/unclassified/` | Motion that passed the persistence gate but YOLO26n found nothing | Subjects the nano model **misses** — the highest-value recall examples |
 | `archive/classified/` | Event-sampled frames where the Pi **confirmed** detections at conf 0.70, with a `.json` sidecar recording the Pi's verdict | **Refines existing classes** — hard positives of `person`/`car`/`dog` etc. from the deployment viewpoint, plus confirmed `truck`/`bird` parents to mine vendor/species subclasses from. Sidecars enable Pi-vs-teacher agreement auditing |
 | `archive/reclassified/` | Frames where the Mac-side YOLO26l/x pass found objects the Pi missed | Pre-confirmed hard positives with teacher detections |
-| `archive/processed/` | Frames verified to contain nothing | **Hard negatives** — background images that teach the model to stop hallucinating the houselight-as-traffic-light class of errors |
+| `archive/processed/` | Frames the reclassifier did not consider noteworthy | Potential negatives only after review; may contain ordinary cars, bicycles or missed objects |
 | `beast_cam/` | Wildlife bounding-box crops | Fine-grained species/subject examples |
 
-Because every frame comes from the deployed camera (same lens, same angle, same lighting cycle), a model fine-tuned on this corpus is refined *for this scene specifically* — the definition of local refinement. The unclassified set improves **recall** (what the model misses); the classified set improves **precision and subclass granularity** (sharpening what it already finds); the processed set suppresses **false positives**.
+Because every frame comes from the deployed camera (same lens, same angle, same lighting cycle), a model fine-tuned on this corpus is refined *for this scene specifically* — the definition of local refinement. The unclassified set improves **recall** (what the model misses); the classified set improves **precision and subclass granularity** (sharpening what it already finds); reviewed, genuinely empty examples from the processed set can suppress **false positives**.
 
 ### Classified-detection sampling (edge side)
 
@@ -57,7 +65,7 @@ bird                       →  raptor | wild_turkey | canada_goose | cardinal |
 > on pickup day); `work_truck` (ID 109) covers contractor pickups/vans with
 > racks, utility bodies, or trailers.
 
-Cases 1–2 are what make zero-manual-labeling straightforward (detector boxes + LLM crop classification); case 3 requires the LLM to also localize, which is acceptable because these subjects are large or prominence-gated (see Stage B2 quality controls).
+Cases 1–2 combine detector boxes with proposed crop labels. Case 3 also asks the VLM to localize. All cases require human review; geometry and confidence thresholds do not establish correctness.
 
 ---
 
@@ -86,9 +94,9 @@ Pi (edge)  ◀── deploy_model_to_pi.sh (versioned push, health check, rollba
 Vision LLMs are unreliable at emitting pixel-accurate coordinates but excellent at fine-grained classification of a cropped image ("is this truck a UPS truck, a FedEx truck, a trash truck, or none of these?"). So:
 
 1. **Stage A — Teacher detection** (`llm_autolabel.py`): run YOLO26l/x at `conf=0.20` (the existing `reclassify_archive.py` setting) over the archive — `unclassified/`, `reclassified/`, and Beast Cam wildlife crops. Every box is a *localization proposal* with a COCO class.
-2. **Stage B1 — VLM crop labeling** (`llm_autolabel.py`): crops of *refinable* classes (vehicles, `person`, and the generic animal classes `dog`/`cat`/`bear`/`sheep`/`cow`/`horse`/`bird`) are sent to a vision LLM with a **closed-vocabulary prompt** (the candidate subclasses for that parent + `"none"`), structured JSON output, and a confidence gate. `"none"` keeps the original COCO label. Results are cached by image hash — each crop is billed once, ever.
+2. **Stage B1 — VLM crop labeling** (`llm_autolabel.py`): crops of *refinable* classes (vehicles, `person`, and the generic animal classes `dog`/`cat`/`bear`/`sheep`/`cow`/`horse`/`bird`) are sent to a vision LLM with a **closed-vocabulary prompt** (the candidate subclasses for that parent + `"none"`), structured JSON output, and a confidence gate. `"none"` keeps the original COCO label. Results are cached by image hash — successful cached results can avoid repeat calls; retries and concurrent runs are not guaranteed exactly-once billing.
 3. **Stage B2 — Whole-frame screening** (`llm_autolabel.py`): frames where the teacher found *nothing* — the bulk of the unclassified archive — get one whole-frame VLM pass against the scene vocabulary (missed wildlife + `downed_tree`/`smoke`/`flood`). The VLM returns a label **and an approximate normalized bounding box**. Because VLM boxes are rough, this stage carries extra controls: a stricter confidence gate (`LLM_SCENE_MIN_CONFIDENCE`, default 0.85 vs 0.8), box geometry validation, and a minimum-area floor (0.3% of frame, matching the archive's 800px² persistence gate) — and the target subjects tolerate coarse boxes by nature (smoke plumes and downed trees are large; animals only enter the archive if prominent enough to pass the persistence gate).
-4. **Stage C — Dataset assembly** (`llm_autolabel.py`): emits a standard YOLO dataset where class IDs are **COCO 0–79 preserved, custom classes appended from ID 80**. Non-refined teacher boxes are written with their COCO IDs so the fine-tune sees local examples of `person`, `car`, `dog` etc. and does not catastrophically forget the base vocabulary. Frames from `processed/` are included as **empty-label background images** (hard negatives).
+4. **Stage C — Dataset assembly** (`llm_autolabel.py`): emits a standard YOLO dataset where class IDs are **COCO 0–79 preserved, custom classes appended from ID 80**. Non-refined teacher boxes are written with their COCO IDs so the fine-tune sees local examples of `person`, `car`, `dog` etc. and does not catastrophically forget the base vocabulary. Empty-label backgrounds require review; folder membership alone is insufficient evidence.
 5. **Stage D — Train + export** (`train_custom_model.py`): transfer-learn from `yolo26n.pt` at `imgsz=1088` (deployment resolution), validate, **gate the release** on per-class mAP for custom classes *and* non-regression on base classes, then export NCNN and write a `model_card.json` manifest.
 6. **Deploy** (`deploy_model_to_pi.sh`): versioned push to the Pi, atomic symlink swap, service restart, log health check, automatic rollback, and a Slack system-event notification.
 
@@ -101,13 +109,13 @@ Vision LLMs are unreliable at emitting pixel-accurate coordinates but excellent 
 | VLM boxes are imprecise (Stage B2) | Stricter 0.85 confidence gate; box geometry validated and clamped; minimum-area floor rejects boxes too small for a rough box to be useful training signal |
 | Teacher false positives become training data | Teacher conf 0.20 proposals are only *promoted* to custom labels by the VLM; un-refined proposals below 0.35 are discarded from the dataset |
 | Base-class forgetting | Dataset keeps all 80 COCO IDs, includes local COCO-labeled boxes and background negatives; release gate checks base-class mAP against the previous model |
-| Cost runaway | Content-hash cache (`autolabel_cache.jsonl`) covers crops *and* whole frames, shared `--max-crops` budget, optional `--max-usd` spend cap (needs `LLM_PRICE_*_PER_1M` set — real pricing, never guessed) enforced against a **persistent, append-only cross-process ledger** (`spend_ledger.jsonl`, added 2026-08-18) so the cap is a true lifetime total across restarts/crashes/duplicate launches, not a per-run in-memory counter; 429 backoff so a rate limit doesn't burn retries; uploads resized to ≤384px |
-| Spend wasted on low-value re-screening | Folders are walked in **priority order**, not alphabetically: `beast_cam/` → `classified/` → `reclassified/` → `unclassified/` → `processed/` (added 2026-08-18). The first three are guaranteed real content (a detection already exists); `processed/` is verified-empty negatives we already hold 60x the needed count of, so a tight `--max-usd`/`--max-crops` cap exhausts on real content first instead of re-confirming known-empty frames |
+| Cost runaway | Content-hash cache and append-only spend history reduce repeated work. The current ledger does **not** safely enforce a shared ceiling across concurrent runs or unknown/retried requests. Add locking and conservative reservations before further paid labeling; verify provider pricing. |
+| Spend wasted on low-value re-screening | Priority order is `beast_cam/` → `classified/` → `reclassified/` → `unclassified/` → `processed/`. Detections remain proposals and processed frames are not verified empty. Mine the cache and review balanced samples before paying for more inference. |
 | Silent drift | `model_card.json` + Slack digest after every labeling/training run; dataset manifests are append-only and auditable |
 
 ### Human effort
 
-None required per-image. The only recurring human touch points are (a) glancing at the Slack digest after a labeling run, and (b) approving deployment (running the deploy script). Both are review, not labeling.
+Every VLM-promoted box must be explicitly reviewed before training. Review identity, geometry and raw source provenance; preserve rejects and uncertainty. Agent-generated decisions cannot substitute for human review.
 
 ---
 
@@ -203,4 +211,4 @@ python3 app/train_custom_model.py
 bash app/deploy_model_to_pi.sh
 ```
 
-Each run is incremental: the cache means only never-before-seen crops hit the LLM, so the cycle can run weekly (or from a launchd timer next to the sync agent) as the archive grows. Review decisions are pinned in the cache (`reviewed: approved/rejected` records, last-record-wins), so re-labeling never resurrects a rejected verdict and never re-bills a reviewed crop.
+The cache supports incremental runs and pins existing human decisions. Do not schedule paid archive-wide passes until the spend and training gates in the execution plan are enforced. Keep the append-only cache and review history intact.

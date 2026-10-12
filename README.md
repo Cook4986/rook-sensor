@@ -397,7 +397,7 @@ The engine automatically falls back to `yolo26n.pt` (PyTorch) if the NCNN direct
 
 ## Archive & Sync
 
-Rook archives two categories of images on the Pi for downstream model training and review:
+Rook archives three categories of images on the Pi for downstream model training and review:
 
 | Archive | Path on Pi | Content |
 |---|---|---|
@@ -407,27 +407,51 @@ Rook archives two categories of images on the Pi for downstream model training a
 
 ### Sync to Mac (launchd)
 
-A `launchd` agent runs every 15 minutes, pulling new files from the Pi via `scp` to a local staging directory, then copying into Dropbox:
+A `launchd` agent runs every 15 minutes, pulling new files from the Pi using tar over SSH to a local staging directory, then copying into Dropbox:
 
 ```
-Pi → scp → ~/rook-staging/ → cp → ~/Library/CloudStorage/Dropbox/Rook/archive/
+Pi → SSH/tar → ~/rook-staging/ → cp → ~/Library/CloudStorage/Dropbox/Rook/archive/
 ```
 
 Installation:
 
 ```bash
-# Install the launchd agent (replaces any prior crontab entry)
-cp app/com.rook.sync.plist ~/Library/LaunchAgents/
-launchctl load ~/Library/LaunchAgents/com.rook.sync.plist
+# Install or update the script copy and launchd schedule
+bash app/install_mac_sync.sh
 
-# Verify
-launchctl list | grep rook
-
-# Logs
+# Authoritative status and logs (local disk)
+cat ~/rook-staging/.sync_status.json
 tail -f /tmp/rook_sync.log
 ```
 
-> **Note**: The sync script lives at `~/bin/rook_sync.sh` (not inside Dropbox) because macOS restricts `launchd` access to `~/Library/CloudStorage/`. If you update `app/sync_archive.sh`, copy it to `~/bin/rook_sync.sh`.
+The executable lives at `~/bin/rook_sync.sh` because launchd cannot execute it
+through Dropbox. Re-run the installer after script changes. Failures return nonzero
+and are recorded locally; `archive/.sync_status.json` is a secondary breadcrumb.
+Existing nonempty files are skipped, so this is not a historical checksum audit.
+
+### Mine and review the archive without paid inference
+
+```bash
+python3 app/archive_catalog.py
+python3 app/archive_review.py
+```
+
+The catalog inventories all five archive folders, staging mirrors and existing
+label/review metadata. Derived SQLite/JSON files live at `~/rook-local/catalog`.
+It exports date/class-balanced candidate and unscreened-image batches. Filename
+matches are provisional mirror groups, not verified content duplicates; five-minute
+sampling groups are not confirmed events. Inaccessible sources make the report
+incomplete. No source image, legacy cache or training label is changed.
+
+Open the private loopback URL printed by the review server on the same Mac. Explicit
+identity/triage decisions append to `review_decisions.jsonl`; they are **not training
+approval**. Bounding-box and source-hash verification remains a separate gate.
+Regenerate the catalog and restart the review server for the next batch. Preserve
+this local decision ledger: it contains human work and is not a disposable catalog.
+
+The approved [execution plan](docs/execution_plan.md) combines archive mining,
+training safeguards and an independent private dashboard track. The local review
+page is the first component; it is not the hosted phone app.
 
 ### Mac-Side Reclassification
 
@@ -439,6 +463,9 @@ python3 app/reclassify_archive.py --model x    # use yolo11x.pt (maximum quality
 python3 app/reclassify_archive.py --dry-run    # report without moving files
 python3 app/reclassify_archive.py --slack      # send Slack digest of findings
 ```
+
+The reclassifier moves non-noteworthy results to `processed/`, including ordinary
+objects. That folder does not certify empty frames; review before using negatives.
 
 ### Manual Cleanup
 
@@ -454,16 +481,22 @@ ssh rook@rook.local "df -h ~"   # verify space freed
 
 ## Custom Model Training — LLM Auto-Label Pipeline
 
-The base YOLO26n model covers 80 COCO classes but cannot distinguish site-specific objects (Amazon van vs. generic truck, trash truck vs. delivery). Rook extends the model using the **unclassified archive as training data**, with **zero manual annotation** — a teacher detector draws the boxes and a vision LLM assigns fine-grained local labels. Full design: [`docs/llm_autolabel_pipeline.md`](docs/llm_autolabel_pipeline.md).
+The base YOLO26n model covers 80 COCO classes. The teacher detector and VLM pipeline
+propose site-specific boxes and labels across a 30-class appended vocabulary.
+**Every promoted custom box requires human review.** Confidence is not approval.
 
-1. **Data mining** — automatic: `archive/unclassified/` + `archive/reclassified/` supply subjects the Pi missed (recall), `archive/classified/` supplies Pi-confirmed detections that refine existing classes (precision), and `archive/processed/` provides hard-negative background frames
-2. **Auto-labeling** — `python3 app/llm_autolabel.py`: YOLO26l/x proposes boxes at conf 0.20, then a vision LLM classifies crops into a 30-class local vocabulary — vendor delivery vans (UPS/FedEx/Amazon/USPS/DHL), municipal vehicles (trash truck, street sweeper, school bus), emergency responders, work trucks, specific wildlife (coyote, fox, deer, raccoon, raptor, cardinal, ...), and `baseball_player` (closed vocabulary, confidence-gated, content-hash cached so each crop is billed once). Frames where the detector found nothing get a **whole-frame screening pass** for missed wildlife, natural phenomena (`downed_tree`, `smoke`), and curbside `trash_bins`; every promoted label then passes the human review gate (`app/review_custom_labels.py`) before training
-3. **Fine-tuning** — `python3 app/train_custom_model.py`: transfer learning on `yolo26n.pt` at `imgsz=1088`, with a **release gate** (custom-class mAP minimum + base-class non-regression) before export
-4. **NCNN export** — automatic on gate pass; required to maintain ~150ms inference on the Pi's CPU
-5. **Deployment** — `bash app/deploy_model_to_pi.sh`: versioned push, atomic symlink swap, health check, automatic rollback, `🧠🔄` Slack notice
-6. **Integration** — custom classes are already wired into `SCORE_MAP`, `EMOJI_MAP`, and scene heuristics; they are inert until a custom model is deployed
+The October 2026 audit found that review is not yet enforced by dataset assembly or
+trainer preflight, validation coverage is sparse, and the spend ledger lacks locking
+and request reservation. Do not start another paid labeling or training run until
+[execution-plan milestone 2](docs/execution_plan.md) passes. `processed/` images
+must not become empty-label negatives solely because of their folder.
 
-> The original manually-annotated plan (Roboflow/CVAT) is preserved in [`rook_custom_model_proposal.md`](rook_custom_model_proposal.md); its annotation step is superseded by the LLM pipeline.
+The existing scripts cover labeling (`llm_autolabel.py`), legacy gallery review
+(`review_custom_labels.py`), fine-tuning/export (`train_custom_model.py`) and
+versioned deployment (`deploy_model_to_pi.sh`). Their release checks still need
+strengthening; no custom model has shipped. Custom alert mappings remain inert
+until a validated model is deployed. Design and known gaps are in
+[the pipeline reference](docs/llm_autolabel_pipeline.md).
 
 ---
 
