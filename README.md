@@ -458,8 +458,9 @@ page is the first component; it is not the hosted phone app.
 
 The [event delivery foundation](docs/event_delivery.md) adds versioned observations,
 a bounded local SQLite outbox and an outbound HTTPS worker. It is tested locally
-with synthetic events; camera integration and the authenticated hosted receiver are
-still pending. The running Slack path is unchanged.
+with synthetic events. An opt-in raw-camera adapter is implemented but disabled by
+default; Pi rollout and the authenticated hosted receiver are still pending.
+The running Slack path is unchanged.
 
 ### Mac-Side Reclassification
 

@@ -15,6 +15,8 @@ from ultralytics import YOLO
 from suntime import Sun
 import httpx
 from rook_weather import RookEnrichment
+from rook_capture import (load_observed_model, finish_model_evidence, start_capture,
+                          publish_observation, stop_capture)
 
 # Load Environment Variables
 load_dotenv(os.path.expanduser("~/rook-env/.env"))
@@ -132,6 +134,7 @@ ARCHIVE_MIN_COHESION = _env_float("ROOK_ARCHIVE_MIN_COHESION", 0.0)
 
 # Master alert switch — when False, email/Slack/heartbeat/digest all no-op.
 ALERTS_ENABLED = _env_bool("ROOK_ALERTS_ENABLED", True)
+EVENTS_ENABLED = _env_bool("ROOK_EVENTS_ENABLED", False)
 
 # Pre-compute MOG2 dilation kernel once at module load (avoid per-frame allocation)
 _MOG2_KERNEL = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
@@ -1317,18 +1320,22 @@ def main():
     _yolo11_ncnn = os.path.expanduser("~/yolo11n_1088_ncnn_model")
     _model_label = None
     if os.path.isdir(_yolo26_ncnn):
-        model = YOLO(_yolo26_ncnn, task="detect")
+        model, event_evidence = load_observed_model(
+            lambda p: YOLO(p, task="detect"), _yolo26_ncnn, 'ncnn', EVENTS_ENABLED, defer_verification=True)
         _model_label = "YOLO26n (NCNN)"
     elif os.path.isdir(_yolo11_ncnn):
-        model = YOLO(_yolo11_ncnn, task="detect")
+        model, event_evidence = load_observed_model(
+            lambda p: YOLO(p, task="detect"), _yolo11_ncnn, 'ncnn', EVENTS_ENABLED, defer_verification=True)
         _model_label = "YOLOv11n (NCNN)"
     else:
         # PyTorch fallback — try yolo26n first, then yolo11n
         try:
-            model = YOLO("yolo26n.pt")
+            model, event_evidence = load_observed_model(
+                YOLO, "yolo26n.pt", 'pytorch', EVENTS_ENABLED, defer_verification=True)
             _model_label = "YOLO26n (PyTorch)"
         except Exception:
-            model = YOLO("yolo11n.pt")
+            model, event_evidence = load_observed_model(
+                YOLO, "yolo11n.pt", 'pytorch', EVENTS_ENABLED, defer_verification=True)
             _model_label = "YOLOv11n (PyTorch)"
         logging.warning(f"⚠️  NCNN model not found, falling back to {_model_label}.")
     # Pin NCNN to 3 of Pi 5's 4 cores — leaves 1 for OS/camera ISP, reduces contention
@@ -1350,6 +1357,10 @@ def main():
     if _custom_active:
         _model_label += f" +custom[{','.join(_custom_active)}]"
     logging.info(f"🧠 {_model_label} loaded.")
+    event_evidence = finish_model_evidence(model, event_evidence)
+    capture = start_capture(EVENTS_ENABLED, event_evidence,
+                            os.environ.get('ROOK_EVENT_DEVICE_ID'),
+                            os.environ.get('ROOK_EVENT_OUTBOX', os.path.expanduser('~/rook-local/outbox/events.sqlite3')))
 
     cam = Picamera2()
     cam.configure(cam.create_video_configuration(main={"size": (1920, 1080)}))
@@ -1461,6 +1472,7 @@ def main():
 
             # ── Capture & orient frame ─────────────────────────────────────
             frame = cam.capture_array()
+            captured_at = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z') if EVENTS_ENABLED else None
             if frame.shape[2] == 4:
                 frame = frame[:, :, :3]
             if flip_180:
@@ -1614,6 +1626,12 @@ def main():
                     detected_classes, results[0].boxes, results[0].names, frame_w, frame_h
                 )
 
+                # Raw observations have their own arrival gate; never wait for
+                # disk/encoding/network or alter Slack's cooldown/linger logic.
+                publish_observation(capture, frame, captured_at,
+                                    results[0].boxes, results[0].names, detected_classes,
+                                    {c: AIRBORNE_CONF_REQ for c in AIRBORNE_CLASSES})
+
                 # Update lingerer tracker — returns any threshold-crossing alerts
                 linger_alerts = lingerer.update(
                     detected_classes, results[0].boxes, results[0].names, frame_w, frame_h
@@ -1654,6 +1672,7 @@ def main():
                     # Only archive when persistence threshold met AND rate limiter allows
                     if (archive_persistence_count >= ARCHIVE_PERSISTENCE_REQ
                             and now_mono_arc - last_archive_save >= ARCHIVE_RATE_LIMIT_SECONDS):
+                        publish_observation(capture, frame, captured_at)
                         logging.info(f"   📸 Persistent unclassified motion archived "
                                      f"(blob={largest_blob:.0f}px², conc={concentration:.2f}, "
                                      f"cohesion={cohesion:.2f}, "
@@ -1804,8 +1823,11 @@ def main():
     except KeyboardInterrupt:
         logging.info("\n🛑 Shutting down Rook Engine...")
     finally:
-        cam.stop()
-        cam.close()
+        try:
+            cam.stop()
+            cam.close()
+        finally:
+            stop_capture(capture)
 
 
 if __name__ == "__main__":

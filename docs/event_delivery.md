@@ -1,9 +1,10 @@
 # Device events and durable delivery
 
-This is the local foundation for execution-plan milestone 3. The modules are not
-connected to the camera loop or installed on the Pi yet. The receiver, owner app,
-private storage and account setup are subsequent work. No network request occurs
-on import, queue creation or queue inspection. Slack does not import these modules.
+This is the local foundation for execution-plan milestone 3. The engine has an
+opt-in camera adapter, disabled by default and not deployed to the Pi yet. The
+receiver, owner app, private storage and account setup are subsequent work. No
+network request occurs on import, capture, queue creation or queue inspection.
+The delivery worker runs separately from the engine and its Slack functions.
 
 ## Version 1 observation
 
@@ -31,10 +32,20 @@ the detector's label. The producer must obtain IDs/names from the loaded model;
 the receiver must check them against the registered model vocabulary. Neither an
 event nor an optional subclass is human training approval.
 
-The upcoming producer must compute model identity from the actual loaded artifact
-and hash the ordered name list with `canonical`. It must retain that artifact's
-manifest with registration; a configured display name alone is insufficient proof.
-Artifact hashing for NCNN directories is still part of producer integration.
+The producer hashes the artifact before loading and after resolving the loaded
+model's names. Deferred verification preserves NCNN thread setup before lazy
+backend initialization. Any mismatch disables event capture, preserving the loaded
+detector. Missing pre-load artifacts (including a first-run auto-download) cannot
+be certified during that startup; restart with the existing local artifact.
+
+For a single weights file the identity is its byte SHA256. For NCNN directories,
+hash `canonical` of the sorted relative-file manifest: each record has `path`,
+`bytes`, `sha256`. Include all regular files, require `.bin` and `.param`, reject
+symlinks and changing files, and bound reads to 1,000 files/512 MiB. Do not add
+runtime files inside the model directory. The ordered name list is also hashed
+with `canonical`. Registration evidence is retained beside the spool in
+`models/<artifact_sha>-<classes_sha>.json`, without absolute source paths.
+The hosted receiver must register/validate these manifests; this is not yet built.
 
 `canonical` is UTF-8 JSON, sorted keys, compact separators, literal Unicode, no
 NaN/Infinity. The event digest covers these exact bytes. The wire envelope carries
@@ -44,8 +55,8 @@ This preserves Python number formatting through a JavaScript receiver.
 
 Each event is at most 64 KiB; an attachment is at most 2 MiB. The spool verifies
 attachment length and SHA256 against its reference. It does not decode JPEGs or
-prove that pixels are unannotated. The capture adapter must encode a raw frame,
-provide actual dimensions, and never use `results.plot()` or an alert preview.
+prove that pixels are unannotated. The capture adapter encodes a raw frame,
+provides actual dimensions, and never uses `results.plot()` or an alert preview.
 The receiver must independently decode/validate JPEG content and dimensions.
 
 ## Local durability and bounds
@@ -74,10 +85,57 @@ Repeated enqueue of the same device/event ID and identical bytes is a no-op whil
 queued. Different bytes with that identity are an error. Acknowledged IDs need
 receiver-side deduplication; the local queue does not retain unbounded tombstones.
 
-SQLite I/O is synchronous and can block or fail. The capture adapter must use a
-small bounded background handoff, not call enqueue from the detection/Slack path.
-Anything still in that memory handoff at a crash is not yet durable; report that
-boundary honestly. This adapter and its failure-isolation tests remain to be built.
+SQLite I/O is synchronous and can block or fail. The capture adapter uses a small
+bounded background handoff, not synchronous enqueue in the detection/Slack path.
+Anything still in that memory handoff at a crash is not yet durable.
+
+## Opt-in camera adapter
+
+`app/rook_capture.py` connects the engine to the local spool only. Default
+`ROOK_EVENTS_ENABLED=0` performs no model fingerprinting, frame copies or spool
+writes. When enabled it requires an explicit stable `ROOK_EVENT_DEVICE_ID`;
+`ROOK_EVENT_OUTBOX` defaults to `~/rook-local/outbox/events.sqlite3`. No endpoint or
+device credential belongs in the camera adapter. Enable the separate delivery
+worker only after authenticated ingestion is ready. Pi rollout remains pending.
+
+The handoff permits two outstanding frames total, including the one being written.
+Each input must be uint8 BGR, three channels and at most 8 MiB. Submission validates
+small metadata, assigns the event UUID and copies the raw buffer once. Copying is
+CPU/memory work on the capture thread; it is not a hard real-time latency guarantee.
+One daemon thread encodes native-size JPEG quality85, hashes its bytes, commits to
+SQLite and writes diagnostic health. Images over the 2 MiB attachment cap are
+rejected with a counted failure, never silently resized or substituted.
+
+Capture time is recorded immediately after `capture_array` returns, before camera
+orientation/inference; it is an acquisition timestamp, not a hardware shutter clock.
+Boxes are normalized to the oriented raw frame. Label names are checked against the
+loaded vocabulary. Detector observations retain corresponding boxes for the scene's
+eligible labels and airborne confidence filter; selection is at class level, not
+per-instance tracking or a claim that every fixture box was removed.
+
+The adapter has an independent label-arrival gate: unchanged scenes are suppressed,
+an observed absence rearms returning labels, and accepted detection observations
+are at least10 seconds apart. A new label still present after throttling can then
+be captured. Acceptance here means memory admission, not durable commit; a later
+write failure is counted as lost capture and not silently replayed under a new ID.
+Motion observations reuse the existing persistent-motion archive sampling gate.
+They are not approved empty frames or training negatives. Slack's cooldowns,
+quiet hours, scoring and lingerer rules are unchanged.
+
+Startup, encoding, full-queue, disk and invalid-input failures are contained.
+The adapter reports session counters in `capture_status.json`: memory admissions,
+commits, handoff/full-outbox drops, write failures and invalid captures. It also
+reports state and error class without exception details. Health writes are bounded
+to at most once per5 seconds during activity, with a60-second idle heartbeat;
+startup/shutdown state transitions can write immediately. Disk stalls can also
+stall this health file, so the future dashboard must show stale status honestly.
+This file is diagnostic, not an atomic per-event audit or a lifetime drop ledger.
+
+Shutdown requests drain pending work but waits at most0.25 seconds for the writer;
+a stuck writer cannot hold up camera teardown. The daemon's remaining memory work
+can be lost when the process exits. Disk/HTTP waits are isolated, but encoding
+still shares CPU and memory with inference. Measure latency/thermal impact on the
+Pi before enabling; local failure tests do not replace that device check.
 
 ## Worker and receiver contract
 
@@ -147,3 +205,10 @@ receiver, corruption, rejected credentials, malformed receipts, HTTPS/redirect a
 token-file restrictions. They use synthetic records and HTTP mocks, not yard images
 or real service tokens. Hosted deduplication, RLS, revoked-token enforcement and a
 real private image on the owner's phone remain milestone acceptance work.
+
+`python3 -m unittest discover -s tests -p test_capture_adapter.py -v` covers the
+producer: raw-buffer ownership, native JPEG decode, model/vocabulary consistency,
+loading-time mutation, disabled behavior, deferred backend setup, stalled/full/
+failed storage, bounded admission/shutdown, scene reappearance and a complete
+capture→SQLite→mocked HTTPS receipt round trip. No real Pi camera or Slack messages
+are used in these tests.
