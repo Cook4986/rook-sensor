@@ -446,6 +446,9 @@ incomplete. No source image, legacy cache or training label is changed.
 Open the private loopback URL printed by the review server on the same Mac. Explicit
 identity/triage decisions append to `review_decisions.jsonl`; they are **not training
 approval**. Bounding-box and source-hash verification remains a separate gate.
+The catalog also exports `reviewed_candidates.json` and `discovery_followups.json`
+so completed decisions drive box verification and focused discovery work. These
+exports are proposals with human triage, not a certified training dataset.
 Regenerate the catalog and restart the review server for the next batch. Preserve
 this local decision ledger: it contains human work and is not a disposable catalog.
 
@@ -486,8 +489,10 @@ propose site-specific boxes and labels across a 30-class appended vocabulary.
 **Every promoted custom box requires human review.** Confidence is not approval.
 
 The October 2026 audit found that review is not yet enforced by dataset assembly or
-trainer preflight, validation coverage is sparse, and the spend ledger lacks locking
-and request reservation. Do not start another paid labeling or training run until
+trainer preflight and validation coverage is sparse. Paid-request locking and
+conservative reservations are now implemented; see [spend accounting](docs/spend_accounting.md)
+for required local-ledger initialization and verified pricing policy. Do not start
+another paid labeling or training run until
 [execution-plan milestone 2](docs/execution_plan.md) passes. `processed/` images
 must not become empty-label negatives solely because of their folder.
 

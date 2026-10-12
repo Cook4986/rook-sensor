@@ -4,7 +4,8 @@ This document supersedes the annotation step (§2) of [`rook_custom_model_propos
 
 > **October 12, 2026 implementation status:** this document mixes existing mechanisms
 > and intended safeguards. Human review is mandatory (D2), but legacy assembly/training
-> does not enforce it. The lifetime spend ledger lacks a process lock/reservations;
+> does not enforce it. Paid accounting now uses a locked local ledger and conservative
+> per-attempt reservations ([details](spend_accounting.md));
 > first-release baseline and missing-class coverage checks are incomplete. Follow
 > [execution-plan milestone 2](execution_plan.md) before further paid runs/training.
 > The local catalog/review browser makes proposals reviewable; its identity/triage
@@ -109,7 +110,7 @@ Vision LLMs are unreliable at emitting pixel-accurate coordinates but excellent 
 | VLM boxes are imprecise (Stage B2) | Stricter 0.85 confidence gate; box geometry validated and clamped; minimum-area floor rejects boxes too small for a rough box to be useful training signal |
 | Teacher false positives become training data | Teacher conf 0.20 proposals are only *promoted* to custom labels by the VLM; un-refined proposals below 0.35 are discarded from the dataset |
 | Base-class forgetting | Dataset keeps all 80 COCO IDs, includes local COCO-labeled boxes and background negatives; release gate checks base-class mAP against the previous model |
-| Cost runaway | Content-hash cache and append-only spend history reduce repeated work. The current ledger does **not** safely enforce a shared ceiling across concurrent runs or unknown/retried requests. Add locking and conservative reservations before further paid labeling; verify provider pricing. |
+| Cost runaway | Content-hash cache and append-only spend history reduce repeated work. The local paid-run lock and durable per-attempt reservations now guard the configured ceiling on one designated host. A verified model/endpoint policy and historical-ledger initialization are required; see [spend accounting](spend_accounting.md). |
 | Spend wasted on low-value re-screening | Priority order is `beast_cam/` → `classified/` → `reclassified/` → `unclassified/` → `processed/`. Detections remain proposals and processed frames are not verified empty. Mine the cache and review balanced samples before paying for more inference. |
 | Silent drift | `model_card.json` + Slack digest after every labeling/training run; dataset manifests are append-only and auditable |
 
@@ -172,9 +173,7 @@ LLM_MODEL_B2=                      # optional override: Stage B2 whole-frame scr
 LLM_MIN_CONFIDENCE=0.8             # Stage B1: below this, crop keeps its COCO label
 LLM_SCENE_MIN_CONFIDENCE=0.85      # Stage B2: stricter — VLM boxes are approximate
 LLM_CROP_MAX_PX=384                # Stage B1 crop upload cap, longest edge
-LLM_PRICE_INPUT_PER_1M=            # USD/1M input tokens — set from your provider's
-LLM_PRICE_OUTPUT_PER_1M=           # pricing page to make --max-usd enforce a real cap;
-                                   # left unset (0) by default rather than guessing
+# Pricing/token bounds now live in --spend-policy (docs/spend_accounting.md).
 ```
 
 Or Gemini, via Google's OpenAI-compatibility endpoint:
@@ -190,8 +189,10 @@ LLM_REASONING_EFFORT=none          # reasoning models burn max_tokens on thinkin
 ### Typical cycle
 
 ```bash
-# 1. Label everything new in the archive (idempotent, cached)
-python3 app/llm_autolabel.py --slack
+# 1. Reuse cached verdicts (no paid VLM calls; teacher still runs)
+python3 app/llm_autolabel.py
+# Paid runs additionally require --allow-paid --spend-policy, a local ledger,
+# and the remaining execution-plan training/data prerequisites.
 
 # 2. Review every custom label by eye BEFORE training — mandatory since the
 #    Jul 2026 audit (B2 wildlife finds measured 1/30 precision unreviewed).

@@ -111,6 +111,9 @@ class CatalogTest(unittest.TestCase):
         self.assertEqual(summary["local_review_decisions_not_applied"], 1)
         self.assertEqual(ledger.read_bytes(), before)
         self.assertEqual(self.cache.read_bytes(), b"")
+        followups = json.loads((self.out / "discovery_followups.json").read_text())
+        self.assertEqual(followups[0]["item_id"], item["item_id"])
+        self.assertFalse(followups[0]["applied_to_training"])
 
 
 class SyncTest(unittest.TestCase):

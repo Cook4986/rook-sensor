@@ -229,7 +229,8 @@ def build_catalog(archive, staging, output, batch_size=40):
                 (item["kind"] + item["source_filename"]).encode()).hexdigest()
             proposal = decisions.get(key, {}).get("proposal", {})
             return any(proposal.get(k) != item.get(k) for k in ("kind", "label", "source_filename"))
-        batch = balanced_batch([i for i in pending if needs_review(i)], batch_size)
+        remaining = [i for i in pending if needs_review(i)]
+        batch = balanced_batch(remaining, batch_size)
         cached_names = {r.get("source") for r in cache.values()}
         unknowns = {}
         for row in sorted(locations, key=lambda r: r[1] == "staging"):
@@ -269,7 +270,9 @@ def build_catalog(archive, staging, output, batch_size=40):
                 "cache_review_states": dict(Counter(r.get("reviewed", "unmarked") for r in cache.values())),
                 "candidate_labels": dict(Counter(r["label"] for r in pending)),
                 "pending_candidates": len(pending), "review_batch_size": len(batch),
+                "remaining_candidate_identity_reviews": len(remaining),
                 "local_review_decisions_not_applied": len(decisions),
+                "human_decisions": dict(Counter(r.get("decision") for r in decisions.values())),
                 "uncached_filename_groups": len(unknowns),
                 "discovery_batch_size": len(discovery), **review_summary,
                 "limits": ["No image bytes read or content hashes verified",
@@ -280,7 +283,11 @@ def build_catalog(archive, staging, output, batch_size=40):
             db.execute("INSERT INTO metadata VALUES (?,?)", ("summary", json.dumps(summary)))
         database.replace(output / "catalog.sqlite3")
         for name, value in (("summary.json", summary), ("review_batch.json", batch),
-                            ("discovery_batch.json", discovery)):
+                            ("discovery_batch.json", discovery),
+                            ("discovery_followups.json", [r for r in decisions.values()
+                                if r.get("decision") == "interesting"]),
+                            ("reviewed_candidates.json", [r for r in decisions.values()
+                                if r.get("scope") == "candidate_identity"])):
             target = Path(tmp) / name
             target.write_text(json.dumps(value, indent=2) + "\n")
             target.replace(output / name)

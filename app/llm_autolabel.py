@@ -28,7 +28,7 @@ ZERO manual annotation, using a two-model split:
             empty-label background negatives (anti-hallucination).
 
 Privacy: runs entirely on the owner's Mac against the owner's own Dropbox
-archive. Crops are sent to the configured LLM API only when LLM_API_KEY is
+archive. Crops require explicit --allow-paid plus a verified spend policy; LLM_API_KEY is
 set; otherwise Stage B is skipped and the dataset uses teacher labels only.
 Nothing here runs on (or transmits from) the Pi.
 
@@ -41,31 +41,26 @@ are processed beast_cam/ -> classified/ -> reclassified/ -> unclassified/ ->
 processed/, NOT alphabetically and NOT by folder size. The first three are
 guaranteed real content (a detection already exists); unclassified/ is the
 zero-detection recall net (lower hit rate but the only source for subjects
-too small to box); processed/ is verified-empty negatives we already hold
-60x the needed count of, so it's funded last — a tight budget should be
-spent on real content before re-confirming frames we know are empty.
+too small to box). Processed frames are lower-priority proposals, not certified
+empty frames. Human review is required before assigning background labels.
 
-Spend ledger (added 2026-08-18): --max-usd is enforced against a PERSISTENT
-cross-process total in autolabel/spend_ledger.jsonl, not this run's own
-in-memory counter. This closed a real gap — an orphaned/duplicate process
-(or a kill that didn't reach a child) kept billing while a fresh run's own
-zero-based counter had no way to see that spend, so two runs could each
-individually respect a $50 cap while jointly blowing past it. Every
-billable call appends its incremental cost immediately; the ledger is
-append-only and summed at startup, same durability pattern as
-autolabel_cache.jsonl.
+Paid calls now require --allow-paid and --spend-policy. Each HTTP attempt reserves
+its verified model upper bound before network I/O. Unknown usage and crashes retain
+that reservation; there are no automatic refunds. One designated host holds the
+local ledger lock for the entire run. See docs/spend_accounting.md before use.
+Default execution uses cached verdicts only; it can still assemble unreviewed labels.
 
 Usage:
-    python3 llm_autolabel.py                  # label everything new
+    python3 llm_autolabel.py                  # reuse cached labels; no paid inference
     python3 llm_autolabel.py --dry-run        # report without writing dataset
-    python3 llm_autolabel.py --max-crops 200  # cap LLM calls this run
-    python3 llm_autolabel.py --max-usd 5.00   # stop once estimated spend hits $5
-                                               # (requires LLM_PRICE_*_PER_1M below)
+    python3 llm_autolabel.py --max-crops 200  # cap new items, not HTTP retries
+    python3 llm_autolabel.py --allow-paid --spend-policy policy.json --max-usd 50
+                                               # requires verified spend policy
     python3 llm_autolabel.py --slack          # send Slack digest when done
 
 Config (~/.env, Mac-side):
     LLM_API_BASE=https://api.openai.com/v1    # any OpenAI-compatible endpoint
-    LLM_API_KEY=sk-...                        # unset → Stage B skipped
+    LLM_API_KEY=sk-...                        # required only for paid refinement
     LLM_MODEL=gpt-4o-mini                     # vision-capable chat model, both stages
     LLM_MODEL_B1=                             # override: Stage B1 crop classification
     LLM_MODEL_B2=                             # override: Stage B2 whole-frame screening
@@ -76,12 +71,6 @@ Config (~/.env, Mac-side):
                                                # improve at B1)
     LLM_MIN_CONFIDENCE=0.8                    # below this → keep COCO label
     LLM_CROP_MAX_PX=384                       # longest-edge cap for Stage B1 crop uploads
-    LLM_PRICE_INPUT_PER_1M=                   # USD per 1M input tokens — required for
-    LLM_PRICE_OUTPUT_PER_1M=                  # USD per 1M output tokens — --max-usd to
-                                               # actually enforce a cap; left unset (0) by
-                                               # default rather than guessing a provider's
-                                               # current rate. Check your provider's
-                                               # pricing page and set both.
 
 Gemini (via Google's OpenAI-compat endpoint):
     LLM_API_BASE=https://generativelanguage.googleapis.com/v1beta/openai
@@ -103,6 +92,7 @@ from datetime import datetime
 
 import httpx
 from dotenv import load_dotenv
+from spend_guard import SpendGuard, SpendError, BudgetExhausted
 
 # ── Config ────────────────────────────────────────────────────────────────────
 load_dotenv(Path.home() / ".env")
@@ -111,17 +101,13 @@ ARCHIVE_DIR      = Path.home() / "Library/CloudStorage/Dropbox/Rook/archive"
 UNCLASSIFIED_DIR = ARCHIVE_DIR / "unclassified"
 CLASSIFIED_DIR   = ARCHIVE_DIR / "classified"     # Pi-confirmed detections + .json sidecars
 RECLASSIFIED_DIR = ARCHIVE_DIR / "reclassified"
-PROCESSED_DIR    = ARCHIVE_DIR / "processed"      # hard negatives (verified empty)
+PROCESSED_DIR    = ARCHIVE_DIR / "processed"      # potential negatives; folder membership is not review
 BEAST_CAM_DIR    = ARCHIVE_DIR / "beast_cam"      # wildlife crops (date subdirs)
 DATASET_DIR      = ARCHIVE_DIR / "autolabel"      # output YOLO dataset
 CACHE_FILE       = DATASET_DIR / "autolabel_cache.jsonl"
-# Persistent, cross-process spend ledger (added 2026-08-18, D-pending). A
-# single run's --max-usd only sees its OWN in-memory cost_so_far, which is
-# blind to spend from any other run — a crashed/orphaned process, a botched
-# kill that leaves a child alive, or a duplicate launch. This file is the
-# durable source of truth for "how much has this API key actually spent,
-# ever" so --max-usd is a real hard ceiling across restarts, not per-run.
-SPEND_LEDGER_FILE = DATASET_DIR / "spend_ledger.jsonl"
+# Legacy history remains unchanged; initialize the designated host's local ledger
+# explicitly before paid work. No empty-ledger fallback is allowed.
+SPEND_LEDGER_FILE = Path.home() / "rook-local/autolabel/spend_ledger.jsonl"
 
 LLM_API_BASE = os.environ.get("LLM_API_BASE", "https://api.openai.com/v1")
 LLM_API_KEY  = os.environ.get("LLM_API_KEY", "")
@@ -147,11 +133,7 @@ SCENE_MIN_BOX_AREA = 0.003   # normalized area floor — matches the archive's
 # need more detail than this, and it's the single biggest per-call cost lever.
 LLM_CROP_MAX_PX = int(os.environ.get("LLM_CROP_MAX_PX", "384"))
 
-# Cost estimation is opt-in: left at 0 (unconfigured) rather than hardcoding a
-# provider's current rate, which this codebase has no way to verify is still
-# accurate. Set both from your provider's pricing page to make --max-usd real.
-LLM_PRICE_INPUT_PER_1M  = float(os.environ.get("LLM_PRICE_INPUT_PER_1M", "0") or "0")
-LLM_PRICE_OUTPUT_PER_1M = float(os.environ.get("LLM_PRICE_OUTPUT_PER_1M", "0") or "0")
+# Paid pricing and token ceilings come only from an explicit verified policy.
 
 # Teacher proposals: same low threshold as reclassify_archive.py to catch
 # faint/distant subjects; boxes NOT promoted by the VLM must clear a higher
@@ -338,20 +320,15 @@ RATE_LIMIT_BASE_BACKOFF = 1.0  # seconds; doubles each retry, capped at 30s + ji
 NON_429_MAX_ATTEMPTS = 2       # unchanged from the original "one retry" behavior
 
 
-def _vlm_round_trip(client: httpx.Client, jpg: bytes, prompt: str, parse_fn, model: str):
-    """Shared VLM call. Returns (verdict, usage) — verdict is None on failure,
-    usage is {"prompt_tokens", "completion_tokens"} (zeros if unavailable).
-
-    Two independent retry budgets: 429s back off exponentially (honoring
-    Retry-After when the provider sends one) and don't count against the
-    ordinary-failure budget, since a rate limit isn't a broken request — it's
-    the request working as intended, just needing to wait.
-    """
+def _vlm_round_trip(client: httpx.Client, jpg: bytes, prompt: str, parse_fn, model: str, budget=None):
+    """Reserve each HTTP attempt durably; report aggregate known usage of retries."""
+    if budget is None:
+        raise SpendError("Paid requests require an active spend guard")
     b64 = base64.b64encode(jpg).decode()
     payload = {
         "model": model,
         "temperature": 0,
-        "max_tokens": 100,
+        "max_tokens": budget.rates[model][3],
         **({"reasoning_effort": LLM_REASONING_EFFORT} if LLM_REASONING_EFFORT else {}),
         "messages": [{
             "role": "user",
@@ -368,10 +345,25 @@ def _vlm_round_trip(client: httpx.Client, jpg: bytes, prompt: str, parse_fn, mod
     attempts = 0
     while attempts < NON_429_MAX_ATTEMPTS:
         try:
-            r = client.post(f"{LLM_API_BASE}/chat/completions", json=payload, timeout=60)
+            reservation = budget.reserve(model)
+        except BudgetExhausted:
+            return None, usage
+        try:
+            r = client.post(f"{budget.endpoint}/chat/completions", json=payload, timeout=60)
         except httpx.HTTPError:
+            budget.observe(reservation, None)
             attempts += 1
             continue
+        try:
+            body = r.json()
+        except ValueError:
+            body = None
+        u = body.get("usage") if isinstance(body, dict) else None
+        budget.observe(reservation, u)
+        if isinstance(u, dict):
+            for key in usage:
+                if type(u.get(key)) is int and u[key] >= 0:
+                    usage[key] += u[key]
         if r.status_code == 429:
             if rate_limit_retries >= RATE_LIMIT_MAX_RETRIES:
                 break
@@ -380,40 +372,36 @@ def _vlm_round_trip(client: httpx.Client, jpg: bytes, prompt: str, parse_fn, mod
                 wait = float(retry_after) if retry_after else backoff
             except ValueError:
                 wait = backoff
-            time.sleep(min(wait + random.uniform(0, 0.5), 30))
+            time.sleep(max(0, min(wait + random.uniform(0, 0.5), 30)))
             backoff = min(backoff * 2, 16)
             rate_limit_retries += 1
             continue
         try:
             r.raise_for_status()
-            body = r.json()
-            u = body.get("usage") or {}
-            usage["prompt_tokens"] = u.get("prompt_tokens", 0)
-            usage["completion_tokens"] = u.get("completion_tokens", 0)
             verdict = parse_fn(body["choices"][0]["message"]["content"])
             if verdict is not None:
                 return verdict, usage
-        except httpx.HTTPError:
+        except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError):
             pass
         attempts += 1
     return None, usage
 
 
-def classify_frame(client: httpx.Client, frame_jpg: bytes):
+def classify_frame(client: httpx.Client, frame_jpg: bytes, budget=None):
     """Stage B2: whole-frame screening. Returns ({"label","confidence","box"} or None, usage)."""
-    return _vlm_round_trip(client, frame_jpg, _scene_prompt(), _parse_scene_verdict, LLM_MODEL_B2)
+    return _vlm_round_trip(client, frame_jpg, _scene_prompt(), _parse_scene_verdict, LLM_MODEL_B2, budget)
 
 
-def classify_crop(client: httpx.Client, crop_jpg: bytes, parent_class: str, candidates: list):
+def classify_crop(client: httpx.Client, crop_jpg: bytes, parent_class: str, candidates: list, budget=None):
     """Stage B1: one crop-classification round-trip. Returns ({"label","confidence"} or
     None, usage) — malformed responses are retried once, then dropped (caller falls
     back to the COCO label); a bad label is worse than no label.
     """
     return _vlm_round_trip(client, crop_jpg, _crop_prompt(parent_class, candidates),
-                           lambda text: _parse_verdict(text, candidates), LLM_MODEL_B1)
+                           lambda text: _parse_verdict(text, candidates), LLM_MODEL_B1, budget)
 
 
-# ── Verdict cache (content-addressed — each crop billed once, ever) ──────────
+# ── Verdict cache (content-addressed; successful results avoid repeat calls) ──────────
 def load_cache() -> dict:
     cache = {}
     if CACHE_FILE.exists():
@@ -431,34 +419,6 @@ def append_cache(record: dict):
     CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
     with open(CACHE_FILE, "a") as f:
         f.write(json.dumps(record) + "\n")
-
-
-def load_ledger_total() -> float:
-    """Sum of every recorded spend increment, ever, across all runs and
-    processes. Append-only, same durability pattern as the label cache —
-    a crash mid-write loses at most one partial line, never prior totals."""
-    total = 0.0
-    if SPEND_LEDGER_FILE.exists():
-        with open(SPEND_LEDGER_FILE) as f:
-            for line in f:
-                try:
-                    total += json.loads(line)["delta_usd"]
-                except (json.JSONDecodeError, KeyError, TypeError):
-                    continue
-    return total
-
-
-def append_ledger(delta_usd: float, note: str = ""):
-    """Record one incremental spend event immediately — called right after
-    each billable call, not batched, so a killed/orphaned process's spend is
-    visible to every other process's next ledger read, not just its own
-    in-memory counter."""
-    if delta_usd <= 0:
-        return
-    SPEND_LEDGER_FILE.parent.mkdir(parents=True, exist_ok=True)
-    with open(SPEND_LEDGER_FILE, "a") as f:
-        f.write(json.dumps({"ts": datetime.now().isoformat(timespec="seconds"),
-                             "delta_usd": round(delta_usd, 6), "note": note}) + "\n")
 
 
 # ── Dataset assembly ──────────────────────────────────────────────────────────
@@ -506,37 +466,45 @@ def main():
                         help="teacher YOLO26 size (default: l)")
     parser.add_argument("--max-crops", type=int, default=1000,
                         help="max NEW crops sent to the LLM this run (cost budget)")
-    parser.add_argument("--max-usd", type=float, default=None,
-                        help="stop new LLM calls once TOTAL estimated spend — this run "
-                             "PLUS every prior run's recorded spend in "
-                             "autolabel/spend_ledger.jsonl — hits this many dollars "
-                             "(requires LLM_PRICE_INPUT_PER_1M/LLM_PRICE_OUTPUT_PER_1M "
-                             "to be set — otherwise a warning is printed and the cap "
-                             "is NOT enforced)")
+    parser.add_argument("--max-usd", default="50",
+                        help="lifetime ceiling including conservative reservations; at most $50")
+    parser.add_argument("--allow-paid", action="store_true",
+                        help="explicitly enable paid inference (default: cache only)")
+    parser.add_argument("--spend-policy", type=Path,
+                        help="verified endpoint/model rates and maximum token bounds JSON")
     parser.add_argument("--max-negatives", type=int, default=300,
                         help="max background negatives from processed/")
     parser.add_argument("--dry-run", action="store_true",
-                        help="classify and report, but write no dataset files")
+                        help="write no dataset files; --allow-paid still permits billed calls/cache writes")
     parser.add_argument("--slack", action="store_true",
                         help="send Slack digest of labeling results")
     args = parser.parse_args()
 
-    # Late imports — keep --help fast
+    if args.allow_paid:
+        if not LLM_API_KEY or not args.spend_policy:
+            parser.error("Paid work requires LLM_API_KEY and --spend-policy")
+        try:
+            policy = json.loads(args.spend_policy.read_text())
+            with SpendGuard(SPEND_LEDGER_FILE, policy, LLM_API_BASE,
+                            {LLM_MODEL_B1, LLM_MODEL_B2}, args.max_usd) as budget:
+                run_pipeline(args, budget)
+        except (SpendError, OSError, ValueError) as exc:
+            parser.exit(2, f"Paid labeling stopped: {exc}\n")
+    else:
+        print("Cache-only mode: no VLM network requests. Dataset output remains unreviewed.")
+        run_pipeline(args, None)
+
+
+def run_pipeline(args, budget):
+    with httpx.Client(headers={"Authorization": f"Bearer {LLM_API_KEY}"}) as client:
+        return _run_pipeline(args, budget, client)
+
+
+def _run_pipeline(args, budget, client):
+    # Late imports: invalid paid configuration fails before models/images load.
     from ultralytics import YOLO
     import cv2
-
-    if not LLM_API_KEY:
-        print("⚠️  LLM_API_KEY not set — Stage B (VLM refinement) will be SKIPPED.")
-        print("   Dataset will contain teacher labels only (no custom classes).")
-
-    usd_priced = LLM_PRICE_INPUT_PER_1M > 0 or LLM_PRICE_OUTPUT_PER_1M > 0
-    usd_enforced = args.max_usd is not None and usd_priced
-    if args.max_usd is not None and not usd_priced:
-        print(f"⚠️  --max-usd {args.max_usd:.4f} set but LLM_PRICE_INPUT_PER_1M/"
-              f"LLM_PRICE_OUTPUT_PER_1M are both unset (0) — cost cannot be estimated, "
-              f"so this run will NOT stop on spend. Set both from your provider's "
-              f"current pricing page to enforce it.")
-
+    usd_priced = budget is not None
     vlm_label = LLM_MODEL if LLM_MODEL_B1 == LLM_MODEL_B2 else f"B1={LLM_MODEL_B1} B2={LLM_MODEL_B2}"
     print(f"🏷️  Rook Auto-Label — teacher yolo26{args.model}.pt, VLM {vlm_label}")
     try:
@@ -587,13 +555,8 @@ def main():
         return
 
     cache = load_cache()
-    client = httpx.Client(headers={"Authorization": f"Bearer {LLM_API_KEY}"})
 
-    prior_spend = load_ledger_total() if usd_priced else 0.0
-    if usd_enforced and prior_spend > 0:
-        print(f"   💳 Spend ledger: ${prior_spend:.4f} already spent across prior/other "
-              f"runs — --max-usd {args.max_usd:.4f} is a TOTAL ceiling, not per-run.")
-
+    prior_spend = float(budget.initial_total) if budget else 0.0
     llm_calls = 0
     tokens_in = 0
     tokens_out = 0
@@ -610,14 +573,10 @@ def main():
                 print(f"   💰 --max-crops {args.max_crops} reached — no further LLM calls this run.")
                 budget_msg_printed = True
             return False
-        if usd_enforced and (prior_spend + cost_so_far) >= args.max_usd:
-            if not budget_msg_printed:
-                print(f"   💰 --max-usd {args.max_usd:.4f} reached (this run: ${cost_so_far:.4f} + "
-                      f"prior: ${prior_spend:.4f} = ${prior_spend + cost_so_far:.4f}) — "
-                      f"no further LLM calls this run.")
-                budget_msg_printed = True
+        if budget is None:
             return False
-        return True
+        return any(budget.total + budget.request_bound(model) <= budget.ceiling
+                   for model in (LLM_MODEL_B1, LLM_MODEL_B2))
 
     print(f"   Processing {len(frames)} frames (cache: {len(cache)} verdicts)...\n")
 
@@ -651,7 +610,7 @@ def main():
             x1, y1, x2, y2 = (int(v) for v in boxes.xyxy[i].tolist())
             final_id = None
 
-            if cls_name in REFINABLE and LLM_API_KEY:
+            if cls_name in REFINABLE:
                 crop = frame[max(0, y1):min(img_h, y2), max(0, x1):min(img_w, x2)]
                 if crop.size == 0 or min(crop.shape[:2]) < 24:
                     verdict = None   # too small to classify — keep COCO label
@@ -670,15 +629,11 @@ def main():
                         stats["cache_hits"] += 1
                     elif crop_hash and budget_left():
                         verdict, usage = classify_crop(client, jpg.tobytes(), cls_name,
-                                                       REFINABLE[cls_name])
+                                                       REFINABLE[cls_name], budget)
                         llm_calls += 1
                         tokens_in += usage["prompt_tokens"]
                         tokens_out += usage["completion_tokens"]
-                        call_cost = (usage["prompt_tokens"] / 1e6) * LLM_PRICE_INPUT_PER_1M \
-                                  + (usage["completion_tokens"] / 1e6) * LLM_PRICE_OUTPUT_PER_1M
-                        cost_so_far += call_cost
-                        if usd_priced:
-                            append_ledger(call_cost, note=f"B1 {cls_name}")
+                        cost_so_far = float(budget.total - budget.initial_total)
                         if verdict is None:
                             stats["llm_failures"] += 1
                         else:
@@ -710,7 +665,7 @@ def main():
         # These are the frames the pipeline exists for — motion with no COCO
         # detection: small wildlife (squirrels, rabbits, turkeys) and scene
         # phenomena (downed trees, smoke, flooding) the detector cannot propose.
-        if not labels and LLM_API_KEY:
+        if not labels:
             frame_hash = hashlib.sha256(img_path.read_bytes()).hexdigest()
             verdict = None
             if frame_hash in cache:
@@ -719,15 +674,11 @@ def main():
             elif budget_left():
                 ok, jpg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
                 if ok:
-                    verdict, usage = classify_frame(client, jpg.tobytes())
+                    verdict, usage = classify_frame(client, jpg.tobytes(), budget)
                     llm_calls += 1
                     tokens_in += usage["prompt_tokens"]
                     tokens_out += usage["completion_tokens"]
-                    call_cost = (usage["prompt_tokens"] / 1e6) * LLM_PRICE_INPUT_PER_1M \
-                              + (usage["completion_tokens"] / 1e6) * LLM_PRICE_OUTPUT_PER_1M
-                    cost_so_far += call_cost
-                    if usd_priced:
-                        append_ledger(call_cost, note="B2 frame")
+                    cost_so_far = float(budget.total - budget.initial_total)
                     if verdict is None:
                         stats["llm_failures"] += 1
                     else:
@@ -786,8 +737,9 @@ def main():
         manifest = {
             "generated": datetime.now().isoformat(timespec="seconds"),
             "teacher": f"yolo26{args.model}.pt", "teacher_conf": TEACHER_CONF,
-            "vlm_b1": LLM_MODEL_B1 if LLM_API_KEY else None,
-            "vlm_b2": LLM_MODEL_B2 if LLM_API_KEY else None,
+            "vlm_b1": LLM_MODEL_B1,
+            "vlm_b2": LLM_MODEL_B2,
+            "paid_enabled": budget is not None,
             "vlm_min_confidence": LLM_MIN_CONF,
             "scene_min_confidence": SCENE_MIN_CONF,
             "crop_max_px": LLM_CROP_MAX_PX,
@@ -799,10 +751,11 @@ def main():
                                      "disagree": stats["pi_disagree"]},
             "llm_calls": llm_calls, "cache_hits": stats["cache_hits"],
             "tokens_in": tokens_in, "tokens_out": tokens_out,
-            "estimated_cost_usd": round(cost_so_far, 4) if usd_priced else None,
+            "reserved_budget_usd": round(cost_so_far, 6) if usd_priced else None,
+            "http_attempts": budget.attempts if budget else 0,
             "prior_ledger_spend_usd": round(prior_spend, 4) if usd_priced else None,
             "total_spend_to_date_usd": round(prior_spend + cost_so_far, 4) if usd_priced else None,
-            "max_usd_cap": args.max_usd if usd_enforced else None,
+            "max_usd_cap": str(budget.ceiling) if budget else None,
         }
         with open(DATASET_DIR / "manifest.json", "w") as f:
             json.dump(manifest, f, indent=2)
@@ -827,8 +780,8 @@ def main():
     print(f"   Background negs   : {len(negatives)}")
     print(f"   LLM calls / cache : {llm_calls} / {stats['cache_hits']}")
     if tokens_in or tokens_out:
-        cost_str = (f"est. ${cost_so_far:.4f} this run, ${prior_spend + cost_so_far:.4f} total to date"
-                    if usd_priced else "cost unpriced (set LLM_PRICE_*_PER_1M)")
+        cost_str = (f"reserved ${cost_so_far:.4f} this run, ${prior_spend + cost_so_far:.4f} total to date"
+                    if usd_priced else "cache only")
         print(f"   Tokens in / out   : {tokens_in} / {tokens_out} ({cost_str})")
     if stats["llm_failures"]:
         print(f"   LLM failures      : {stats['llm_failures']} (kept COCO labels)")
@@ -844,7 +797,7 @@ def main():
             combined[k] = combined.get(k, 0) + v
         summary = "  ".join(f"{k} ×{v}" for k, v in
                             sorted(combined.items(), key=lambda x: -x[1]))
-        cost_note = f", est. ${cost_so_far:.4f} (${prior_spend + cost_so_far:.4f} total)" if usd_priced else ""
+        cost_note = f", reserved ${cost_so_far:.4f} (${prior_spend + cost_so_far:.4f} total)" if usd_priced else ""
         send_slack(f"🏷️ *Rook Auto-Label* — {stats['frames']} frames → "
                    f"{stats['boxes']} boxes ({promoted_total} crop promotions, "
                    f"{scene_total} whole-frame finds)\n"
