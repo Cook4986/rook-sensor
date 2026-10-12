@@ -2,8 +2,10 @@
 
 This is the local foundation for execution-plan milestone 3. The engine has an
 opt-in camera adapter, disabled by default and not deployed to the Pi yet. The
-receiver, owner app, private storage and account setup are subsequent work. No
-network request occurs on import, capture, queue creation or queue inspection.
+receiver, owner app and transactional private image store are implemented locally
+in `web/` and `supabase/`; see [the dashboard guide](private_dashboard.md). Hosted
+account setup and acceptance remain open. No network request occurs on import,
+capture, queue creation or queue inspection.
 The delivery worker runs separately from the engine and its Slack functions.
 
 ## Version 1 observation
@@ -45,7 +47,8 @@ symlinks and changing files, and bound reads to 1,000 files/512 MiB. Do not add
 runtime files inside the model directory. The ordered name list is also hashed
 with `canonical`. Registration evidence is retained beside the spool in
 `models/<artifact_sha>-<classes_sha>.json`, without absolute source paths.
-The hosted receiver must register/validate these manifests; this is not yet built.
+The operator provisioning CLI validates/registers these manifests; ingestion checks
+model identity and class mappings against the registration. See the dashboard guide.
 
 `canonical` is UTF-8 JSON, sorted keys, compact separators, literal Unicode, no
 NaN/Infinity. The event digest covers these exact bytes. The wire envelope carries

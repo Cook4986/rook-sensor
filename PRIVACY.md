@@ -1,46 +1,51 @@
 # Privacy Policy
 
 **Rook — Privacy-First Ambient Yard Monitor**
-*Last updated: May 2, 2026*
+*Last updated: October 12, 2026*
 
 ---
 
 ## What Rook Is
 
-Rook is a personal, single-user IoT camera system that runs on a Raspberry Pi 5. It uses edge AI (YOLOv11n) to detect objects and activity in its field of view, translates detections into emoji-based summaries, and delivers notifications to the device owner via Slack, email, and optionally SMS.
+Rook is a personal, single-user IoT camera system that runs on a Raspberry Pi 5. It uses edge AI (YOLO26n) to detect objects and activity in its field of view, translates detections into emoji-based summaries, and delivers notifications to the device owner via Slack and email. SMS is a retired implementation path; its historical program terms remain below.
 
 ## Core Privacy Commitment
 
 **No video is ever recorded, saved, or transmitted.**
 
-Rook processes camera frames in real-time on the device itself (edge inference). Frames are held in volatile memory during inference and immediately discarded. The only outputs are:
+Rook processes camera frames in real-time on the device itself (edge inference). Live inference uses volatile memory, but selected still frames are retained in the
+training archive and wildlife digest cache. Outputs include:
 
 - **Emoji-based notifications** (e.g., `📦🚚`, `🦅`) sent to the device owner via Slack and/or email
-- **Anonymized metadata** (timestamp, detection class, confidence score) optionally logged locally for the device owner's personal review
+- **Event metadata** (timestamp, detection class, confidence score) optionally logged locally for the device owner's personal review
+- **Archived still frames** from classified and unclassified activity, synced to the owner's private archive for review and model development
 - **Wildlife crops** (Beast Cam) temporarily cached on-device and sent to the device owner in the nightly digest, then deleted immediately after confirmed delivery
 
 ## Data Collection
 
 ### What We Do NOT Collect
-- Raw video or image streams
+- Continuous video recordings
 - Biometric data or facial recognition data
-- Personal information about individuals in the camera's field of view
+- Identity labels for individuals; however, retained still images may depict identifiable people
 - Location data beyond what the device owner explicitly configures
 - Any data from third parties
 
 ### What the Device Processes Locally
-- Camera frames at 1920×1080, processed in volatile memory (RAM) and immediately discarded after inference
+- Camera frames for live inference; selected still frames and wildlife crops may be retained
 - Motion detection data via background subtraction (pixel-level, never stored)
 - Object detection results (class labels such as "person", "car", "bird" — no identification of individuals)
 
 ### What Is Transmitted
 - Emoji-based alert messages sent to the device owner via Slack webhook and/or SMTP email
-- Optional SMS notifications via Twilio, sent only to the device owner's verified phone number (see SMS section below)
+- Legacy SMS support via Twilio is no longer the active notification plan
 - Nightly digest email including activity summary and wildlife crop images, sent only to the device owner
+- Optional archive labeling requests to an owner-configured vision service, described below
+- Once explicitly configured and deployed, event metadata and selected raw JPEGs to the owner's private dashboard; no dashboard uploads are enabled by default
 
 ## SMS Notifications (Twilio)
 
-Rook may optionally send SMS notifications via Twilio's A2P 10DLC registered messaging service.
+The following describes the historical optional SMS path. SMS is not being enabled
+as part of the private dashboard pilot.
 
 ### Opt-In
 The device owner opts in by entering their own phone number in the device configuration file (`~/rook-env/.env`) during initial setup. No other individuals are enrolled, and no unsolicited messages are sent.
@@ -65,7 +70,7 @@ Standard message and data rates from your mobile carrier may apply. Carriers are
 
 - **On-device:** No video storage. The SD card contains the OS, application code, configuration, and a rate-limited training archive of still frames (`~/rook-archive/`): motion frames YOLO could not classify, and event-sampled frames with confirmed detections (640×360, with detection-class metadata). Archive frames are synced to the owner's private storage and deleted from the device within 7 days. `/tmp` and `/var/log` are RAM disks (tmpfs), cleared on every reboot.
 - **Beast Cam cache:** Wildlife bounding-box crops are stored temporarily in `~/beast_cam/YYYY-MM-DD/` and deleted from the device immediately after the nightly digest email is confirmed sent.
-- **Cloud (optional, not yet implemented):** A future dashboard feature may store anonymized event metadata in a Supabase Postgres database under the owner's account.
+- **Private dashboard (implemented locally, not hosted yet):** the opt-in pilot stores event metadata and raw JPEGs together in Supabase Postgres. Only the provisioned owner may read them through authenticated routes and row-level security. The initial quota is 1,000 events or 256 MiB of logical payload per device; there is no automatic cloud deletion yet. Retention and hosting costs must be settled before ongoing capture. Implementation: [private dashboard guide](docs/private_dashboard.md).
 
 ## Third-Party Services
 
@@ -73,10 +78,11 @@ Standard message and data rates from your mobile carrier may apply. Carriers are
 |---------|---------|-------------|
 | **Slack** | Real-time emoji alerts | Message text only (no images by default) |
 | **SMTP / Gmail** | Email alerts + nightly digest | Message text + annotated detection image |
-| **Twilio** (optional) | SMS delivery | Message text, recipient phone number |
+| **Twilio** (legacy) | SMS delivery | Message text, recipient phone number |
 | **Open-Meteo** | Weather context (read-only API) | Device IP, GPS bounding box from configured coordinates |
 | **iNaturalist API** | Local species context (read-only) | Configured latitude/longitude |
 | **Tailscale** | Secure remote SSH (VPN) | Device hostname, encrypted IP tunnel |
+| **Supabase + Vercel** (planned hosting for the opt-in dashboard) | Owner authentication, private event/image storage and serving | Owner account information, event metadata and selected raw JPEGs; server credentials remain server-side |
 | **LLM API** (optional, owner-configured) | Offline auto-labeling of the owner's archive for model training | Image crops of detected objects (vehicles, wildlife, uniformed players) and whole archived frames (640×360) from the owner's own archive |
 
 ### LLM Auto-Labeling (optional, off-device)
@@ -84,24 +90,26 @@ Standard message and data rates from your mobile carrier may apply. Carriers are
 The optional training pipeline (`app/llm_autolabel.py`) can send **cropped detections from the owner's own archive** to a vision LLM API the owner configures (e.g., OpenAI, or a fully local model via Ollama/vLLM) to assign fine-grained labels for model training. This tool:
 
 - Runs **only on the owner's computer**, only when the owner invokes it — never on the Pi, never in the real-time detection path
-- Is **opt-in**: if no `LLM_API_KEY` is configured, no data is sent anywhere
+- Is **opt-in**: paid labeling additionally requires explicit paid mode and a verified spend policy; configuring a key alone does not authorize paid inference
 - Sends object crops (vehicles, wildlife) and, for frames where the detector found nothing, whole archived frames (640×360) — all from imagery the owner already possesses in their private archive
 - Can be pointed at a **self-hosted LLM endpoint** for a fully offline workflow
 
-The device's core privacy posture is unchanged: no cloud inference, no video storage, frames exist only in RAM during live operation.
+Live detection remains on-device. Archived stills, digest images, optional labeling
+requests and future private dashboard images are separate data flows; they are not
+anonymous merely because they contain no identity labels.
 
-## GDPR / CCPA
+## Owner Control
 
-Rook is privacy-compliant by design:
-
-- No PII is collected or stored
-- No facial recognition or individual tracking is performed
-- No raw imagery leaves the device
-- The device owner has full control over all data and can delete it at any time
+Rook does not perform facial recognition or name people in detections. Still images
+can contain identifiable people, and selected imagery can leave the Pi through the
+data flows above. The owner controls configuration and access to private archives.
+The dashboard pilot has no deletion or retention interface yet. This technical
+description does not certify compliance with privacy laws.
 
 ## Children's Privacy
 
-Rook does not knowingly collect any information from or about children. The system does not identify, track, or profile individuals of any age.
+Rook does not infer ages or identify people by name. Retained still frames can
+incidentally include people of any age.
 
 ## Changes to This Policy
 

@@ -54,7 +54,9 @@ baseline. A failed/missing card or stale loaded log cannot certify deployment.
    Ingest over outbound HTTPS using a revocable device-scoped credential. Deduplicate
    retries by device/event ID. No public inbound port on the Pi.
 3. Next.js + Supabase: pre-provision the owner, disable public registration, enforce
-   owner authorization/RLS on all data paths, use private images and short-lived URLs.
+   owner authorization/RLS on all data paths and keep images private. The bounded
+   pilot uses an owner-session-checked image endpoint (D17); any later signed URLs
+   must be short-lived.
    Keep elevated server credentials out of the Pi and browser. Test denial paths.
 4. Ship feed, event detail, device health and the archive review experience. Follow
    existing Media mockups; display generic/uncertain labels honestly. A van sighting

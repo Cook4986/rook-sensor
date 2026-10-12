@@ -15,6 +15,7 @@ venv/
 # Environment / secrets
 .env
 *.env
+.env.*
 
 # YOLO model weights (downloaded at runtime)
 *.pt
@@ -40,3 +41,8 @@ Thumbs.db
 *.sqlite3-journal
 *.sqlite3-wal
 *.sqlite3-shm
+
+# Dashboard builds and dependencies remain local
+node_modules/
+.next/
+*.tsbuildinfo

@@ -5,7 +5,7 @@
 <p align="center"><strong>Privacy-First, Visual-to-Emoji Yard Monitor</strong></p>
 <p align="center">
   Open-source edge AI on a Raspberry Pi 5 — watches your yard and sends emoji alerts.<br>
-  No video saved. No cloud inference. No surveillance. Just signal.
+  On-device detection. Owner-controlled still-frame archives and optional private dashboard.
 </p>
 
 <p align="center">
@@ -18,13 +18,13 @@
 
 Rook is a sensor system that watches your yard and sends emoji summaries of what's happening — `🚚📦` for a delivery, `🦅` for a hawk, `🐺⚠️` for a possible coyote, `🌅` at sunrise, `🚗🔒` for a car parked over an hour.
 
-It runs 24/7 on a Raspberry Pi 5 with a Sony STARVIS camera and [YOLO26n](https://docs.ultralytics.com/models/yolo11/), processing everything on-device.
+It runs 24/7 on a Raspberry Pi 5 with a Sony STARVIS camera and YOLO26n, processing live detections on-device.
 
 | Principle | Implementation |
 |---|---|
-| **Privacy by design** | No video saved or transmitted. Frames exist only in RAM during inference. |
+| **Privacy by design** | No continuous video recording. Selected still frames are archived privately; optional image exports are documented in PRIVACY.md. |
 | **Signal over noise** | Solo cars counted silently. Static fixtures auto-suppressed. Only meaningful activity fires alerts. |
-| **Always on** | Headless Pi 5 + Slack/Email. No subscriptions, no cloud GPU, no monthly cost. |
+| **Always on** | Headless Pi 5 + Slack/Email. Optional offline labeling and dashboard hosting can incur service costs. |
 
 ---
 
@@ -459,7 +459,10 @@ page is the first component; it is not the hosted phone app.
 The [event delivery foundation](docs/event_delivery.md) adds versioned observations,
 a bounded local SQLite outbox and an outbound HTTPS worker. It is tested locally
 with synthetic events. An opt-in raw-camera adapter is implemented but disabled by
-default; Pi rollout and the authenticated hosted receiver are still pending.
+default. The [private dashboard](docs/private_dashboard.md) now includes a Next.js
+owner feed, authenticated ingestion, revocable device tokens, model registration and
+transactional private images. Its synthetic preview and database security checks run
+locally; hosted account setup, provider integration and Pi rollout remain pending.
 The running Slack path is unchanged.
 
 ### Mac-Side Reclassification

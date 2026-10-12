@@ -1,0 +1,6 @@
+{
+  "name": "rook-dashboard", "version": "0.1.0", "private": true, "type": "module",
+  "scripts": {"dev": "next dev --hostname 127.0.0.1", "build": "next build --webpack", "start": "next start --hostname 127.0.0.1", "test": "tsx --test tests/*.test.ts", "typecheck": "tsc --noEmit"},
+  "dependencies": {"next": "16.4.0", "react": "19.3.0", "react-dom": "19.3.0", "@supabase/ssr": "0.12.7", "@supabase/supabase-js": "2.117.3", "sharp": "0.35.5", "server-only": "0.0.1"},
+  "devDependencies": {"typescript": "^5.9.0", "tsx": "^4.20.0", "@types/node": "^24.0.0", "@types/react": "^19.0.0", "@types/react-dom": "^19.0.0", "pg": "^8.16.0", "@types/pg": "^8.15.0"}
+}
